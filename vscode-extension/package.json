@@ -1,0 +1,67 @@
+{
+  "name": "squirrel-lsp-vscode",
+  "displayName": "Squirrel Language Server",
+  "description": "VS Code client for the squirrel-lsp formatter server.",
+  "version": "0.1.0",
+  "publisher": "mnshdw",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mnshdw/TooltipDoll"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:squirrel"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "squirrel",
+        "aliases": [
+          "Squirrel",
+          "squirrel"
+        ],
+        "extensions": [
+          ".nut"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "squirrel-lsp.restartServer",
+        "title": "Squirrel LSP: Restart Server"
+      }
+    ],
+    "configuration": {
+      "title": "Squirrel LSP",
+      "properties": {
+        "squirrelLsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the squirrel-lsp executable. Leave empty to look for 'squirrel-lsp' in PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -p ./ --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.90.0",
+    "tslib": "^2.6.3",
+    "typescript": "^5.5.4",
+    "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
