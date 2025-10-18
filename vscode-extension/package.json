@@ -1,13 +1,13 @@
 {
   "name": "squirrel-lsp-vscode",
   "displayName": "Squirrel Language Server",
-  "description": "VS Code client for the squirrel-lsp formatter server.",
+  "description": "Client for the squirrel-lsp language server.",
   "version": "0.1.0",
   "publisher": "mnshdw",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mnshdw/TooltipDoll"
+    "url": "https://github.com/mnshdw/squirrel-lsp"
   },
   "engines": {
     "vscode": "^1.90.0"
@@ -29,7 +29,8 @@
         ],
         "extensions": [
           ".nut"
-        ]
+        ],
+        "configuration": "./language-configuration.json"
       }
     ],
     "commands": [
@@ -50,13 +51,14 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
-    "watch": "tsc -p ./ --watch",
+    "compile": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
     "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
     "@types/vscode": "^1.90.0",
+    "esbuild": "^0.25.11",
     "tslib": "^2.6.3",
     "typescript": "^5.5.4",
     "vsce": "^2.15.0"

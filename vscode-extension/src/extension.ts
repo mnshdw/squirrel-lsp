@@ -9,10 +9,16 @@ import {
 } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
+let clientLog: vscode.OutputChannel | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+    clientLog = vscode.window.createOutputChannel("Squirrel LSP (client)");
+    context.subscriptions.push(clientLog);
+    clientLog.appendLine("Activating Squirrel LSP client...");
+
     context.subscriptions.push(
         vscode.commands.registerCommand("squirrel-lsp.restartServer", async () => {
+            clientLog?.appendLine("Restart command invoked");
             await restartClient(context);
         }),
     );
@@ -21,10 +27,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export async function deactivate(): Promise<void> {
+    clientLog?.appendLine("Deactivating Squirrel LSP client");
     if (client) {
         await client.stop();
         client = undefined;
     }
+    clientLog?.dispose();
+    clientLog = undefined;
 }
 
 async function restartClient(context: vscode.ExtensionContext): Promise<void> {
@@ -36,10 +45,16 @@ async function restartClient(context: vscode.ExtensionContext): Promise<void> {
 }
 
 async function startClient(context: vscode.ExtensionContext): Promise<void> {
+    clientLog?.appendLine("Resolving server executable...");
     const executable = await resolveServerExecutable(context);
     if (!executable) {
+        clientLog?.appendLine("Server executable not found; aborting start");
         return;
     }
+
+    clientLog?.appendLine(`Using server command: ${executable.command} ${
+        executable.args?.join(" ") ?? ""
+    }`);
 
     const debugExecutable: Executable = {
         ...executable,
@@ -63,13 +78,19 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
         clientOptions,
     );
 
+    client.onDidChangeState((event) => {
+        clientLog?.appendLine(`Client state changed: ${event.newState}`);
+    });
+
     try {
         await client.start();
+        clientLog?.appendLine("Language client is ready");
         context.subscriptions.push({ dispose: () => client?.stop() });
     } catch (error) {
-        vscode.window.showErrorMessage(
-            `Failed to start squirrel-lsp: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        const message = error instanceof Error ? error.message : String(error);
+        clientLog?.appendLine(`Client start failed: ${message}`);
+        vscode.window.showErrorMessage(`Failed to start squirrel-lsp: ${message}`);
+        throw error;
     }
 }
 
@@ -81,22 +102,27 @@ async function resolveServerExecutable(
     const candidates: string[] = [];
 
     if (configuredPath && configuredPath.trim().length > 0) {
+        clientLog?.appendLine(`Configured serverPath: ${configuredPath}`);
         candidates.push(configuredPath);
     }
 
     const workspaceBinary = findWorkspaceBinary();
     if (workspaceBinary) {
+        clientLog?.appendLine(`Found workspace binary: ${workspaceBinary}`);
         candidates.push(workspaceBinary);
     }
 
     const defaultCommand = process.platform === "win32" ? "squirrel-lsp.exe" : "squirrel-lsp";
+    clientLog?.appendLine(`Adding default command candidate: ${defaultCommand}`);
     candidates.push(defaultCommand);
 
     for (const candidate of candidates) {
         const executable = await normalizeCandidate(candidate, context.extensionPath);
         if (executable) {
+            clientLog?.appendLine(`Resolved executable: ${executable.command}`);
             return executable;
         }
+        clientLog?.appendLine(`Candidate did not resolve: ${candidate}`);
     }
 
     vscode.window.showErrorMessage(
@@ -135,17 +161,17 @@ async function normalizeCandidate(
 ): Promise<Executable | undefined> {
     const trimmed = candidate.trim();
 
-    // Allow relative paths from the extension directory
     const resolved = path.isAbsolute(trimmed)
         ? trimmed
         : path.join(extensionPath, trimmed);
 
     if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+        clientLog?.appendLine(`Candidate exists at ${resolved}`);
         return { command: resolved, args: [], options: { env: process.env } };
     }
 
-    // Fallback to relying on PATH
     if (trimmed === candidate) {
+        clientLog?.appendLine(`Falling back to PATH lookup for ${trimmed}`);
         return { command: trimmed, args: [], options: { env: process.env } };
     }
 
