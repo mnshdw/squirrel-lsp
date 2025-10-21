@@ -32,12 +32,12 @@ impl FormatOptions {
                 for _ in 0..level * width {
                     buffer.push(' ');
                 }
-            }
+            },
             IndentStyle::Tabs => {
                 for _ in 0..level {
                     buffer.push('\t');
                 }
-            }
+            },
         }
     }
 }
@@ -599,6 +599,7 @@ fn is_operator(text: &str) -> bool {
             | "|="
             | "&="
             | "^="
+            | "in"
     )
 }
 
@@ -638,7 +639,7 @@ fn is_unary_context(prev: Option<&Token>) -> bool {
                     | ":"
             ) || is_operator(text)
                 || matches!(prev.kind, TokenKind::Keyword)
-        }
+        },
     }
 }
 
@@ -676,6 +677,14 @@ print("bye");
         let input = "for(local i=0;i<10;i++){print(i);}";
 
         let expected = "for (local i = 0; i < 10; i++) {\n    print(i);\n}\n";
+        let output = format_document(input, &FormatOptions::default()).unwrap();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn formats_foreach_loop() {
+        let input = "foreach(a in actors){print(a);}";
+        let expected = "foreach (a in actors) {\n    print(a);\n}\n";
         let output = format_document(input, &FormatOptions::default()).unwrap();
         assert_eq!(output, expected);
     }
