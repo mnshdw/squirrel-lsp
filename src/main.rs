@@ -124,12 +124,11 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let mut store = self.documents.write().await;
-        if let Some(entry) = store.get_mut(&params.text_document.uri) {
-            if let Some(TextDocumentContentChangeEvent { text, .. }) =
+        if let Some(entry) = store.get_mut(&params.text_document.uri)
+            && let Some(TextDocumentContentChangeEvent { text, .. }) =
                 params.content_changes.into_iter().next_back()
-            {
-                *entry = text;
-            }
+        {
+            *entry = text;
         }
     }
 

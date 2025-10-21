@@ -275,11 +275,11 @@ impl<'a> Formatter<'a> {
         self.ensure_indent();
         self.apply_pending_space();
         self.output.push(')');
-        if let Some(next_token) = next {
-            if next_token.text == "{" {
-                self.output.push(' ');
-                self.needs_indent = false;
-            }
+        if let Some(next_token) = next
+            && next_token.text == "{"
+        {
+            self.output.push(' ');
+            self.needs_indent = false;
         }
         self.prev = Some(token.clone());
     }
@@ -328,10 +328,10 @@ impl<'a> Formatter<'a> {
             self.output.pop();
         }
         self.output.push(':');
-        if let Some(next_token) = next {
-            if !matches!(next_token.text.as_str(), "}" | "," | ";") {
-                self.output.push(' ');
-            }
+        if let Some(next_token) = next
+            && !matches!(next_token.text.as_str(), "}" | "," | ";")
+        {
+            self.output.push(' ');
         }
         self.prev = Some(token.clone());
     }
