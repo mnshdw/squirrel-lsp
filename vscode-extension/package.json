@@ -15,9 +15,7 @@
   "categories": [
     "Programming Languages"
   ],
-  "activationEvents": [
-    "onLanguage:squirrel"
-  ],
+  "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
     "languages": [
@@ -53,6 +51,8 @@
   "scripts": {
     "compile": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
+    "vscode:prepublish": "node esbuild.js --production",
+    "prepackage": "npm run compile",
     "package": "vsce package"
   },
   "devDependencies": {
@@ -61,7 +61,7 @@
     "esbuild": "^0.25.11",
     "tslib": "^2.6.3",
     "typescript": "^5.5.4",
-    "vsce": "^2.15.0"
+    "@vscode/vsce": "^3.6.2"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
