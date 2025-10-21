@@ -1,0 +1,26 @@
+name: Build Windows (MSVC)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # master commit
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - name: Build Release (static MSVC CRT)
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+          ls -la target/x86_64-pc-windows-msvc/release
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: squirrel-lsp-windows-msvc
+          path: target/x86_64-pc-windows-msvc/release/squirrel-lsp.exe

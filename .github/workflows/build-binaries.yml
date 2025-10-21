@@ -1,0 +1,58 @@
+name: Build binaries (all major targets)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: squirrel-lsp-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: squirrel-lsp-windows-x86_64
+            rustflags: -C target-feature=+crt-static
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: squirrel-lsp-macos-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: squirrel-lsp-macos-x86_64
+
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Set up Rust ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # master commit
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build release
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload artifact (Windows)
+        if: startsWith(matrix.os, 'windows')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/squirrel-lsp.exe
+
+      - name: Upload artifact (Unix)
+        if: ${{ !startsWith(matrix.os, 'windows') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/squirrel-lsp
