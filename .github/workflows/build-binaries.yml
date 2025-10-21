@@ -56,3 +56,33 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: target/${{ matrix.target }}/release/squirrel-lsp
+
+  package-vsix:
+    name: package vscode extension (vsix)
+    runs-on: ubuntu-latest
+    needs: []
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: vscode-extension
+        run: npm ci
+
+      - name: Compile extension
+        working-directory: vscode-extension
+        run: npm run -s compile
+
+      - name: Package VSIX
+        working-directory: vscode-extension
+        run: npm run -s package
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: squirrel-lsp-vscode-vsix
+          path: vscode-extension/*.vsix
