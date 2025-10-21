@@ -1,4 +1,4 @@
-name: Build binaries (all major targets)
+name: Build binaries
 
 on:
   workflow_dispatch:
