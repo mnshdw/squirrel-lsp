@@ -13,12 +13,15 @@ this.perk_legend_muscularity <- this.inherit("scripts/skills/skill", {
 	function onAnySkillUsed(_skill, _targetEntity, _properties) {
 		local item = _skill.getItem();
 
-		if (item != null && item.isItemType(this.Const.Items.ItemType.Defensive) && !item.isItemType(this.Const.Items.ItemType.Weapon)) {
+		if (item != null
+			&& item.isItemType(this.Const.Items.ItemType.Defensive)
+			&& !item.isItemType(this.Const.Items.ItemType.Weapon)) {
 			return;
 		}
 
 		local isValidRanged = item != null && item.isItemType(this.Const.Items.ItemType.Weapon) && (item.isWeaponType(this.Const.Items.WeaponType.Throwing) || item.isWeaponType(this.Const.Items.WeaponType.Bow));
-		if (!_skill.isRanged() || (isValidRanged && item.isItemType(this.Const.Items.ItemType.Weapon))) {
+		if (!_skill.isRanged()
+			|| (isValidRanged && item.isItemType(this.Const.Items.ItemType.Weapon))) {
 			_properties.DamageTotalMult *= 1.0 + this.getBonus();
 		}
 	}

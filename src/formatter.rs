@@ -183,7 +183,7 @@ impl<'a> Formatter<'a> {
             "}" => self.write_close_brace(token, next),
             ";" => self.write_semicolon(token, next),
             "," => self.write_comma(token, next),
-            "(" => self.write_open_paren(token),
+            "(" => self.write_open_paren(token, remaining),
             ")" => self.write_close_paren(token, next),
             "[" => self.write_open_bracket(token, next, remaining),
             "]" => self.write_close_bracket(token),
@@ -193,7 +193,7 @@ impl<'a> Formatter<'a> {
             "++" | "--" => self.write_increment(token),
             _ if token.kind == TokenKind::Comment => self.write_comment(token),
             _ if token.kind == TokenKind::Blankline => self.write_blankline(),
-            _ if is_operator(token.text.as_str()) => self.write_operator(token),
+            _ if is_operator(token.text.as_str()) => self.write_operator(token, remaining),
             _ => self.write_default(token),
         }
     }
@@ -459,16 +459,19 @@ impl<'a> Formatter<'a> {
         self.prev = Some(token.clone());
     }
 
-    fn write_open_paren(&mut self, token: &Token) {
+    fn write_open_paren(&mut self, token: &Token, _remaining: &[Token]) {
         self.prepare_token(token);
         self.output.push('(');
         self.paren_depth += 1;
 
         let prev_text = self.prev.as_ref().map(|p| p.text.as_str());
+        let is_if = prev_text == Some("if");
+
         self.paren_stack.push(prev_text == Some("for"));
-        self.if_stack.push(prev_text == Some("if"));
+        self.if_stack.push(is_if);
         self.func_paren_stack.push(prev_text == Some("function"));
         self.paren_bracket_depth_stack.push(self.bracket_depth);
+
         self.prev = Some(token.clone());
     }
 
@@ -648,7 +651,7 @@ impl<'a> Formatter<'a> {
         self.prev = Some(token.clone());
     }
 
-    fn write_operator(&mut self, token: &Token) {
+    fn write_operator(&mut self, token: &Token, remaining: &[Token]) {
         if is_unary_operator(token.text.as_str()) && is_unary_context(self.prev.as_ref()) {
             self.prepare_token(token);
             self.output.push_str(&token.text);
@@ -657,6 +660,32 @@ impl<'a> Formatter<'a> {
             self.prev_was_unary = true;
             self.prev = Some(token.clone());
             return;
+        }
+
+        // Check if we should break line for logical operators in if conditions
+        let is_logical_op = matches!(token.text.as_str(), "&&" | "||");
+        // Check if ANY enclosing paren is an if - we'll break at the outermost logical operator
+        let in_if_condition = self.paren_depth > 0
+            && self.if_stack.iter().any(|&is_if| is_if);
+
+        if is_logical_op && in_if_condition {
+            // Check if keeping the rest of the condition on one line would exceed 100 chars
+            let current_line_length = self.get_current_line_length();
+            let rest_of_condition_length = self.estimate_length_to_paren_close(remaining);
+
+            // Break if the total would exceed 100 chars
+            if current_line_length + token.text.len() + 2 + rest_of_condition_length > 100 {
+                // Break before the operator (Rust style)
+                self.push_newline();
+                // Add extra indentation for continuation line
+                self.indent_level += 1;
+                self.ensure_indent();
+                self.indent_level -= 1;
+                self.output.push_str(&token.text);
+                self.pending_space = true;
+                self.prev = Some(token.clone());
+                return;
+            }
         }
 
         self.prepare_token(token);
@@ -772,6 +801,60 @@ impl<'a> Formatter<'a> {
 
         length
     }
+
+    fn get_current_line_length(&self) -> usize {
+        // Find the last newline and count visual width (tabs count as 4 spaces)
+        let line = self
+            .output
+            .rsplit_once('\n')
+            .map(|(_, after)| after)
+            .unwrap_or(&self.output);
+
+        line.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
+    }
+
+    fn estimate_length_to_paren_close(&self, remaining: &[Token]) -> usize {
+        let mut length = 0;
+        let mut paren_depth = 0;
+        let mut prev_text = "";
+
+        for token in remaining {
+            // Skip blanklines and comments
+            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
+                continue;
+            }
+
+            // Track paren depth
+            match token.text.as_str() {
+                "(" => paren_depth += 1,
+                ")" => {
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                    } else {
+                        break; // Hit closing paren at depth 0
+                    }
+                }
+                _ => {}
+            }
+
+            // Estimate token length
+            length += token.text.len();
+
+            // Add space for operators and separators
+            if is_operator(&token.text) {
+                length += 2; // spaces around operators
+            } else if !matches!(prev_text, "[" | "(" | "{" | "." | "::")
+                && !matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::")
+            {
+                length += 1; // potential space between tokens
+            }
+
+            prev_text = &token.text;
+        }
+
+        length
+    }
+
 }
 
 fn trim_trailing_whitespace(buffer: &mut String) {
