@@ -95,13 +95,22 @@ Command: "Squirrel LSP: Restart Server"
 
 ## Developing
 
-Build server:
+### Prerequisites
+
+- **Rust toolchain** (rustup) – to build the LSP server
+- **Node.js 18+** – to build the VS Code extension
+
+### Build the server
 
 ```bash
 cargo build --release
 ```
 
-Build/package VS Code extension:
+The binary will be at:
+- macOS/Linux: `target/release/squirrel-lsp`
+- Windows: `target\release\squirrel-lsp.exe`
+
+### Build/package VS Code extension
 
 ```bash
 npm --prefix ./vscode-extension install
@@ -109,11 +118,13 @@ npm --prefix ./vscode-extension run compile
 npm --prefix ./vscode-extension run package
 ```
 
-Install locally (helper script):
+### Install locally (helper script)
 
 ```bash
 ./install.sh
 ```
+
+This script builds both the server and extension, then installs the extension in VS Code.
 
 ---
 

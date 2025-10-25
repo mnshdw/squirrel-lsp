@@ -66,49 +66,9 @@ Open any `.nut` file to activate the extension. Use **Format Document** (`Shift+
 - **Extension not activating**
   - Ensure the file extension is `.nut` and VS Code is version 1.90.0 or newer
 
----
+## Building from Source
 
-## Development
-
-### Prerequisites
-
-1. **Rust toolchain** – to build the `squirrel-lsp` binary
-2. **Node.js 18+** – to build the extension
-3. **VS Code 1.90.0+**
-
-### Build the Server Binary
-
-```bash
-cd /path/to/squirrel-lsp
-cargo build --release
-```
-
-The binary will be at `target/release/squirrel-lsp` (`.exe` on Windows).
-
-### Build the Extension
-
-```bash
-cd vscode-extension
-npm install
-npm run compile
-```
-
-### Launch Extension Development Host
-
-1. Open the repository root in VS Code
-2. Press `F5` to launch the Extension Development Host
-3. Open a `.nut` file to activate the extension
-4. The extension auto-discovers the binary in `target/release` during development
-
-### Package for Distribution
-
-```bash
-npm run package
-```
-
-This creates a `.vsix` file you can distribute or publish to the marketplace.
-
----
+If you want to build the language server yourself instead of using prebuilt binaries, see the [main repository README](https://github.com/mnshdw/squirrel-lsp#developing) for build instructions.
 
 ## License
 
