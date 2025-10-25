@@ -62,6 +62,7 @@ pub enum FormatError {
 struct Token {
     text: String,
     kind: TokenKind,
+    preceded_by_newline: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,12 +360,16 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
         self.output.push(';');
 
-        // If a line comment follows immediately, keep it on the same line
-        let next_is_line_comment = next
-            .filter(|t| t.kind == TokenKind::Comment && t.text.trim_start().starts_with("//"))
+        // If a line comment follows on the same line (not preceded by newline), keep it on the same line
+        let next_is_same_line_comment = next
+            .filter(|t| {
+                t.kind == TokenKind::Comment
+                    && t.text.trim_start().starts_with("//")
+                    && !t.preceded_by_newline
+            })
             .is_some();
 
-        if next_is_line_comment {
+        if next_is_same_line_comment {
             if !matches!(self.output.chars().last(), Some(' ') | Some('\t')) {
                 self.output.push(' ');
             }
@@ -387,6 +392,7 @@ impl<'a> Formatter<'a> {
             let synthetic = Token {
                 text: "}".to_string(),
                 kind: TokenKind::Symbol,
+                preceded_by_newline: false,
             };
             self.write_close_brace(&synthetic, None);
         }
@@ -462,6 +468,7 @@ impl<'a> Formatter<'a> {
             let synthetic = Token {
                 text: "{".to_string(),
                 kind: TokenKind::Symbol,
+                preceded_by_newline: false,
             };
             self.write_open_brace(&synthetic, next);
             self.auto_brace_stack.push(true);
@@ -504,8 +511,15 @@ impl<'a> Formatter<'a> {
         }
         // Add newline before ] to separate ]] or }] onto different lines
         if was_pretty && !self.output.ends_with('\n') {
-            let parent_is_pretty = self.bracket_indent_bump_stack.last().copied().unwrap_or(false);
-            let prev_is_closing = self.prev.as_ref().is_some_and(|p| matches!(p.text.as_str(), "]" | "}"));
+            let parent_is_pretty = self
+                .bracket_indent_bump_stack
+                .last()
+                .copied()
+                .unwrap_or(false);
+            let prev_is_closing = self
+                .prev
+                .as_ref()
+                .is_some_and(|p| matches!(p.text.as_str(), "]" | "}"));
             if parent_is_pretty || prev_is_closing {
                 self.push_newline();
             }
@@ -540,11 +554,21 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_colon(&mut self, token: &Token, next: Option<&Token>) {
-        self.ensure_indent();
-        self.apply_pending_space();
-        if self.output.ends_with(' ') {
+        self.prepare_token(token);
+
+        // Detect if this is a ternary colon by checking if we're in expression context
+        // (parens or brackets) vs object literal context
+        let is_ternary = self.paren_depth > 0 || self.bracket_depth > 0;
+
+        // For ternary operators, ensure space before colon
+        if is_ternary && !self.output.ends_with(' ') {
+            self.output.push(' ');
+        }
+        // For object literals, remove space before colon
+        else if !is_ternary && self.output.ends_with(' ') {
             self.output.pop();
         }
+
         self.output.push(':');
 
         let should_space = !matches!(next.map(|t| t.text.as_str()), Some("}" | "," | ";"));
@@ -582,17 +606,20 @@ impl<'a> Formatter<'a> {
 
     fn write_comment(&mut self, token: &Token) {
         let text = token.text.replace("\r\n", "\n");
+        let trimmed_text = text.trim_start();
 
-        if text.starts_with("//") {
-            if !self.output.ends_with('\n') {
+        if trimmed_text.starts_with("//") {
+            if !self.output.is_empty() && !self.output.ends_with('\n') {
+                // Inline comment after code - use trimmed version
                 if !matches!(self.output.chars().last(), Some(' ') | Some('\t')) {
                     self.output.push(' ');
                 }
-                self.output.push_str(&text);
+                self.output.push_str(trimmed_text);
                 self.push_newline();
             } else {
+                // Comment on its own line - use trimmed version to normalize indentation
                 self.ensure_indent();
-                self.output.push_str(&text);
+                self.output.push_str(trimmed_text);
                 self.push_newline();
             }
             return;
@@ -604,7 +631,7 @@ impl<'a> Formatter<'a> {
                     self.push_newline();
                 }
                 self.ensure_indent();
-                self.output.push_str(line);
+                self.output.push_str(line.trim_start());
             }
             self.push_newline();
             return;
@@ -662,15 +689,18 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
 
         if !visited_children && node.child_count() == 0 {
             let start = node.start_byte();
+            let mut preceded_by_newline = false;
             if start > prev_end {
                 let newline_count = source[prev_end..start]
                     .chars()
                     .filter(|&ch| ch == '\n')
                     .count();
+                preceded_by_newline = newline_count > 0;
                 if newline_count >= 2 {
                     tokens.push(Token {
                         text: String::new(),
                         kind: TokenKind::Blankline,
+                        preceded_by_newline: true,
                     });
                 }
             }
@@ -681,6 +711,7 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
             tokens.push(Token {
                 kind: classify_token(&node),
                 text,
+                preceded_by_newline,
             });
             prev_end = node.end_byte();
         }
