@@ -1,57 +1,115 @@
-# Squirrel Language Server VS Code Extension
+# Squirrel Language Server
 
-This extension wraps the Rust-based [`squirrel-lsp`](../) language server and wires it into VS Code via the Language Server Protocol. Right now the server focuses on document formatting for Squirrel (`.nut`) files.
+Language Server Protocol (LSP) support for Squirrel `.nut` files in VS Code. Provides code formatting capabilities powered by the Rust-based `squirrel-lsp` server.
 
-## Prerequisites
+## Features
 
-1. **Rust toolchain** – required to build the `squirrel-lsp` binary.
-2. **Node.js 18+** – required to build and package the extension.
-3. **VS Code 1.90.0 or newer** – matches the engine version declared in `package.json`.
+- **Document Formatting** – Format Squirrel code with proper indentation and spacing
+- **Format on Save** – Optionally auto-format files when saving
 
-## Build the server binary
+## Installation
 
-```fish
-cd (dirname (status --current-file))/..  # repo root
+### 1. Install the VS Code Extension
+
+Download the VSIX package (`squirrel-lsp-vscode-<version>.vsix`) from the [GitHub Releases](https://github.com/mnshdw/squirrel-lsp/releases) page and install it:
+
+- In VS Code: Extensions panel → `...` → "Install from VSIX..."
+- Or via command line:
+  ```bash
+  code --install-extension /path/to/squirrel-lsp-vscode-<version>.vsix
+  ```
+
+### 2. Install the Language Server Binary
+
+Download the prebuilt `squirrel-lsp` binary for your platform from [GitHub Releases](https://github.com/mnshdw/squirrel-lsp/releases):
+
+- `squirrel-lsp-windows-x86_64.exe` (Windows)
+- `squirrel-lsp-macos-aarch64` (macOS Apple Silicon)
+- `squirrel-lsp-macos-x86_64` (macOS Intel)
+- `squirrel-lsp-linux-x86_64` (Linux)
+
+On Unix-like systems, make the binary executable:
+```bash
+chmod +x /path/to/squirrel-lsp
+```
+
+### 3. Configure the Extension
+
+Set the binary path in VS Code settings:
+
+- Open Settings → search "Squirrel LSP: Server Path"
+- Enter the absolute path to your `squirrel-lsp` binary
+- Or place the binary in your `PATH` and leave the setting empty
+
+## Usage
+
+Open any `.nut` file to activate the extension. Use **Format Document** (`Shift+Alt+F` / `Shift+Option+F`) or enable format-on-save:
+
+```json
+{
+  "[squirrel]": {
+    "editor.formatOnSave": true
+  }
+}
+```
+
+## Commands
+
+- **Squirrel LSP: Restart Server** – Manually restart the language server (useful after updating the binary)
+
+## Troubleshooting
+
+- **"Could not locate the squirrel-lsp executable"**
+  - Set the "Server Path" setting to the binary's absolute path, or ensure it's in your `PATH`
+- **Permission denied (Unix/macOS/Linux)**
+  - Run: `chmod +x /path/to/squirrel-lsp`
+- **Extension not activating**
+  - Ensure the file extension is `.nut` and VS Code is version 1.90.0 or newer
+
+---
+
+## Development
+
+### Prerequisites
+
+1. **Rust toolchain** – to build the `squirrel-lsp` binary
+2. **Node.js 18+** – to build the extension
+3. **VS Code 1.90.0+**
+
+### Build the Server Binary
+
+```bash
+cd /path/to/squirrel-lsp
 cargo build --release
 ```
 
-The compiled binary will live at `target/release/squirrel-lsp` (`.exe` on Windows). Keep track of the absolute path—you can point the extension at it.
+The binary will be at `target/release/squirrel-lsp` (`.exe` on Windows).
 
-## Install dependencies & compile the extension
+### Build the Extension
 
-```fish
-cd squirrel-lsp/vscode-extension
+```bash
+cd vscode-extension
 npm install
 npm run compile
 ```
 
-`npm run compile` emits the transpiled JavaScript into `dist/`.
+### Launch Extension Development Host
 
-## Launching in VS Code
+1. Open the repository root in VS Code
+2. Press `F5` to launch the Extension Development Host
+3. Open a `.nut` file to activate the extension
+4. The extension auto-discovers the binary in `target/release` during development
 
-1. Open the repository root in VS Code.
-2. Run `npm install` and `npm run compile` as shown above.
-3. Press `F5` in VS Code to launch an **Extension Development Host**. The extension defined in this folder will activate when you open a `.nut` file.
-4. When prompted, configure the `squirrel LSP: Server Path` setting with the absolute path to the compiled `squirrel-lsp` executable. If the binary lives in `target/release`, the extension will normally discover it automatically.
+### Package for Distribution
 
-With the extension running, use **Format Document** (`Shift+Alt+F` / `Shift+Option+F`) to format Squirrel files through the language server.
-
-## Packaging for distribution
-
-```fish
+```bash
 npm run package
 ```
 
-This produces a `.vsix` file you can share or publish. Update the `publisher`, `name`, and version in `package.json` before publishing to the marketplace.
+This creates a `.vsix` file you can distribute or publish to the marketplace.
 
-## Troubleshooting
+---
 
-- **Server binary not found** – set `squirrelLsp.serverPath` to the absolute binary path. The extension also searches the workspace `target/release` and `target/debug` folders and finally falls back to `squirrel-lsp` on `PATH`.
-- **Permission denied on Unix** – ensure the binary is executable: `chmod +x target/release/squirrel-lsp`.
-- **Formatting command slow** – build the server in release mode and point the extension at the release binary.
+## License
 
-## Commands
-
-- `Squirrel LSP: Restart Server` – manually restarts the language client (useful after rebuilding the server).
-
-Let us know if additional Squirrel tooling would be helpful—linting, diagnostics, or hover support can extend this foundation.
+MIT

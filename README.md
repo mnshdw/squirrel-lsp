@@ -12,7 +12,7 @@ You need two pieces:
 
 1. VS Code extension (client)
 
-- Download the VSIX package (`squirrel-lsp-vscode-<version>.vsix`) from the [GitHub Releases](https://github.com/antmx/squirrel-lsp/releases) page.
+- Download the VSIX package (`squirrel-lsp-vscode-<version>.vsix`) from the [GitHub Releases](https://github.com/mnshdw/squirrel-lsp/releases) page.
 - Install it in VS Code:
   - In VS Code: Extensions panel → … → "Install from VSIX…"
   - Or in a terminal:
@@ -39,7 +39,7 @@ Choose one of the following:
 
 ### A) Download prebuilt binaries (recommended)
 
-- Download prebuilt binaries for your platform (Windows, macOS [Intel & Apple Silicon], Linux x86_64) from the [GitHub Releases](https://github.com/antmx/squirrel-lsp/releases) page.
+- Download prebuilt binaries for your platform (Windows, macOS [Intel & Apple Silicon], Linux x86_64) from the [GitHub Releases](https://github.com/mnshdw/squirrel-lsp/releases) page.
 
 Binaries are named by platform, for example:
 
