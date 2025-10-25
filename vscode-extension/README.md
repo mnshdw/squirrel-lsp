@@ -11,13 +11,16 @@ Language Server Protocol (LSP) support for Squirrel `.nut` files in VS Code. Pro
 
 ### 1. Install the VS Code Extension
 
-Download the VSIX package (`squirrel-lsp-vscode-<version>.vsix`) from the [GitHub Releases](https://github.com/mnshdw/squirrel-lsp/releases) page and install it:
+Install directly from the VS Code Marketplace:
 
-- In VS Code: Extensions panel → `...` → "Install from VSIX..."
-- Or via command line:
-  ```bash
-  code --install-extension /path/to/squirrel-lsp-vscode-<version>.vsix
-  ```
+- Open VS Code Extensions panel (`Ctrl+Shift+X` / `Cmd+Shift+X`)
+- Search for "Squirrel Language Server"
+- Click "Install"
+
+Or install via command line:
+```bash
+code --install-extension mnshdw.squirrel-lsp-vscode
+```
 
 ### 2. Install the Language Server Binary
 

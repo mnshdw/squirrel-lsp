@@ -12,13 +12,15 @@ You need two pieces:
 
 1. VS Code extension (client)
 
-- Download the VSIX package (`squirrel-lsp-vscode-<version>.vsix`) from the [GitHub Releases](https://github.com/mnshdw/squirrel-lsp/releases) page.
-- Install it in VS Code:
-  - In VS Code: Extensions panel → … → "Install from VSIX…"
-  - Or in a terminal:
-    ```bash
-    code --install-extension /path/to/squirrel-lsp-vscode-<version>.vsix
-    ```
+Install directly from the VS Code Marketplace:
+- Open VS Code Extensions panel (`Ctrl+Shift+X` / `Cmd+Shift+X`)
+- Search for "Squirrel Language Server"
+- Click "Install"
+
+Or via command line:
+```bash
+code --install-extension mnshdw.squirrel-lsp-vscode
+```
 
 2. LSP server binary
 
