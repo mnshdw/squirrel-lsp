@@ -13,7 +13,7 @@ tokio = { version = "1", features = [
 ] }
 tower-lsp = "0.20"
 tree-sitter = "0.20"
-tree-sitter-squirrel = "1.0"
+tree-sitter-squirrel = { git = "https://github.com/mnshdw/tree-sitter-squirrel.git" }
 
 [dev-dependencies]
 pretty_assertions = "1"

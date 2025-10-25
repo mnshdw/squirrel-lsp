@@ -778,8 +778,7 @@ dependencies = [
 [[package]]
 name = "tree-sitter-squirrel"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8af36b5bea3c83daf9ec8821fc6dd366fa0d06b7d9e223b79b2051c4bacdd5a5"
+source = "git+https://github.com/mnshdw/tree-sitter-squirrel.git#e695be8870a4673662c32ded24cf6608ad695306"
 dependencies = [
  "cc",
  "tree-sitter",
