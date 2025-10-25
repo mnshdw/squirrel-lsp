@@ -279,7 +279,9 @@ impl<'a> Formatter<'a> {
     fn write_close_brace(&mut self, token: &Token, next: Option<&Token>) {
         let frame = self.braces.pop();
         let inline = frame.map(|f| f.inline).unwrap_or(false);
-        let is_object = frame.map(|f| f.context == BraceContext::Object).unwrap_or(false);
+        let is_object = frame
+            .map(|f| f.context == BraceContext::Object)
+            .unwrap_or(false);
 
         if self.indent_level > 0 && !inline {
             self.indent_level -= 1;
@@ -288,11 +290,14 @@ impl<'a> Formatter<'a> {
             self.push_newline();
         }
 
-        // Check if we need extra indent for array-of-objects alignment
+        // Extra indent for objects in non-pretty-printed arrays (aligns } with ])
         let next_is_bracket = matches!(next.map(|t| t.text.as_str()), Some("]"));
-        let needs_array_indent = !inline
-            && next_is_bracket
-            && (self.bracket_indent_bump_stack.last().copied().unwrap_or(false) || is_object);
+        let in_pretty_array = self
+            .bracket_indent_bump_stack
+            .last()
+            .copied()
+            .unwrap_or(false);
+        let needs_array_indent = !inline && next_is_bracket && !in_pretty_array && is_object;
 
         if needs_array_indent {
             self.indent_level += 1;
@@ -326,20 +331,21 @@ impl<'a> Formatter<'a> {
                 ")" | ";" => {
                     self.needs_indent = false;
                     return;
-                }
+                },
                 "else" | "catch" | "finally" | "while" => {
                     self.output.push(' ');
                     self.needs_indent = false;
                     self.prev = None;
                     return;
-                }
+                },
                 _ if next_token.kind == TokenKind::Comment
-                    && next_token.text.trim_start().starts_with("//") => {
+                    && next_token.text.trim_start().starts_with("//") =>
+                {
                     self.output.push(' ');
                     self.needs_indent = false;
                     return;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 
@@ -390,7 +396,7 @@ impl<'a> Formatter<'a> {
         self.prepare_token(token);
         self.output.push(',');
 
-        let in_object_top_level = self.braces.last().map_or(false, |f| {
+        let in_object_top_level = self.braces.last().is_some_and(|f| {
             f.context == BraceContext::Object
                 && !f.inline
                 && f.paren_depth_at_open == self.paren_depth
@@ -399,13 +405,22 @@ impl<'a> Formatter<'a> {
         let in_function_params =
             self.func_paren_stack.last().copied().unwrap_or(false) && self.paren_depth > 0;
 
+        let in_pretty_array = self
+            .bracket_indent_bump_stack
+            .last()
+            .copied()
+            .unwrap_or(false);
+
         if in_object_top_level && !in_function_params {
             match next {
                 Some(t) if t.text.as_str() == "function" => self.write_blankline(),
                 _ => self.push_newline(),
             }
+        } else if in_pretty_array {
+            // In a pretty-printed array, commas should create newlines
+            self.push_newline();
         } else {
-            let should_space = next.map_or(true, |t| !matches!(t.text.as_str(), ")" | "]" | "}"));
+            let should_space = next.is_none_or(|t| !matches!(t.text.as_str(), ")" | "]" | "}"));
             if should_space {
                 self.output.push(' ');
             }
@@ -437,7 +452,7 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
         self.output.push(')');
 
-        let next_is_brace = next.map_or(false, |t| t.text == "{");
+        let next_is_brace = next.is_some_and(|t| t.text == "{");
         if next_is_brace {
             self.output.push(' ');
             self.needs_indent = false;
@@ -459,8 +474,16 @@ impl<'a> Formatter<'a> {
         self.output.push('[');
         self.bracket_depth += 1;
 
-        let next_is_object = matches!(next.map(|n| n.text.as_str()), Some("{"));
-        if next_is_object {
+        // Enable pretty-printing for arrays of objects/arrays, or inherit from pretty-printed parent
+        let next_is_complex = matches!(next.map(|n| n.text.as_str()), Some("{") | Some("["));
+        let parent_is_pretty = self
+            .bracket_indent_bump_stack
+            .last()
+            .copied()
+            .unwrap_or(false);
+        let should_pretty_print = next_is_complex || parent_is_pretty;
+
+        if should_pretty_print {
             self.push_newline();
             self.indent_level += 1;
             self.bracket_indent_bump_stack.push(true);
@@ -474,9 +497,18 @@ impl<'a> Formatter<'a> {
         if self.bracket_depth > 0 {
             self.bracket_depth -= 1;
         }
-        // Remove any indentation bump we added for an array that contains an object
-        if self.bracket_indent_bump_stack.pop().unwrap_or(false) && self.indent_level > 0 {
+        // Remove any indentation bump we added for an array with pretty-printing
+        let was_pretty = self.bracket_indent_bump_stack.pop().unwrap_or(false);
+        if was_pretty && self.indent_level > 0 {
             self.indent_level -= 1;
+        }
+        // Add newline before ] to separate ]] or }] onto different lines
+        if was_pretty && !self.output.ends_with('\n') {
+            let parent_is_pretty = self.bracket_indent_bump_stack.last().copied().unwrap_or(false);
+            let prev_is_closing = self.prev.as_ref().is_some_and(|p| matches!(p.text.as_str(), "]" | "}"));
+            if parent_is_pretty || prev_is_closing {
+                self.push_newline();
+            }
         }
         self.ensure_indent();
         self.apply_pending_space();
@@ -489,7 +521,7 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
 
         let prev_text = self.prev.as_ref().map(|p| p.text.as_str());
-        let keep_space = prev_text.map_or(false, |t| is_operator(t) || t == ",");
+        let keep_space = prev_text.is_some_and(|t| is_operator(t) || t == ",");
         if self.output.ends_with(' ') && !keep_space {
             self.output.pop();
         }
@@ -631,7 +663,10 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
         if !visited_children && node.child_count() == 0 {
             let start = node.start_byte();
             if start > prev_end {
-                let newline_count = source[prev_end..start].chars().filter(|&ch| ch == '\n').count();
+                let newline_count = source[prev_end..start]
+                    .chars()
+                    .filter(|&ch| ch == '\n')
+                    .count();
                 if newline_count >= 2 {
                     tokens.push(Token {
                         text: String::new(),
@@ -639,7 +674,10 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
                     });
                 }
             }
-            let text = node.utf8_text(bytes).map_err(|_| FormatError::Utf8)?.to_string();
+            let text = node
+                .utf8_text(bytes)
+                .map_err(|_| FormatError::Utf8)?
+                .to_string();
             tokens.push(Token {
                 kind: classify_token(&node),
                 text,
