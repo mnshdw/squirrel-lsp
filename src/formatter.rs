@@ -11,7 +11,7 @@ pub struct FormatOptions {
 impl Default for FormatOptions {
     fn default() -> Self {
         Self {
-            indent_style: IndentStyle::Spaces(4),
+            indent_style: IndentStyle::Tabs,
             insert_final_newline: true,
             trim_trailing_whitespace: true,
         }
