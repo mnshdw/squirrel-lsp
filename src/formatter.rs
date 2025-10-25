@@ -109,7 +109,8 @@ pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, 
     let mut formatter = Formatter::new(options);
     for (idx, token) in tokens.iter().enumerate() {
         let next = tokens.get(idx + 1);
-        formatter.write_token(token, next);
+        let remaining = &tokens[idx + 1..];
+        formatter.write_token(token, next, remaining);
     }
 
     let mut output = formatter.finish();
@@ -142,6 +143,8 @@ struct Formatter<'a> {
     bracket_indent_bump_stack: Vec<bool>,
     // Tracks the bracket_depth when each paren was opened
     paren_bracket_depth_stack: Vec<usize>,
+    // Tracks the output position where each '[' was written
+    array_start_indices: Vec<usize>,
 }
 
 impl<'a> Formatter<'a> {
@@ -163,6 +166,7 @@ impl<'a> Formatter<'a> {
             func_paren_stack: Vec::new(),
             bracket_indent_bump_stack: Vec::new(),
             paren_bracket_depth_stack: Vec::new(),
+            array_start_indices: Vec::new(),
         }
     }
 
@@ -173,7 +177,7 @@ impl<'a> Formatter<'a> {
         self.output
     }
 
-    fn write_token(&mut self, token: &Token, next: Option<&Token>) {
+    fn write_token(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
         match token.text.as_str() {
             "{" => self.write_open_brace(token, next),
             "}" => self.write_close_brace(token, next),
@@ -181,7 +185,7 @@ impl<'a> Formatter<'a> {
             "," => self.write_comma(token, next),
             "(" => self.write_open_paren(token),
             ")" => self.write_close_paren(token, next),
-            "[" => self.write_open_bracket(token, next),
+            "[" => self.write_open_bracket(token, next, remaining),
             "]" => self.write_close_bracket(token),
             "." | "::" => self.write_member_access(token),
             "?" => self.write_question(token),
@@ -499,10 +503,28 @@ impl<'a> Formatter<'a> {
         self.prev = Some(token.clone());
     }
 
-    fn write_open_bracket(&mut self, token: &Token, next: Option<&Token>) {
+    fn write_open_bracket(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
         self.prepare_token(token);
         self.output.push('[');
         self.bracket_depth += 1;
+
+        // Detect if this is an array subscript (foo[x]) vs array literal ([1, 2, 3])
+        let is_subscript = self.prev.as_ref().is_some_and(|p| {
+            matches!(
+                p.kind,
+                TokenKind::Identifier | TokenKind::Number | TokenKind::String
+            ) || matches!(p.text.as_str(), "]" | ")" | "}")
+        });
+
+        // Don't pretty-print array subscripts or empty arrays
+        let is_empty = matches!(next.map(|n| n.text.as_str()), Some("]"));
+
+        if is_subscript || is_empty {
+            self.bracket_indent_bump_stack.push(false);
+            self.prev = Some(token.clone());
+            self.array_start_indices.push(self.output.len());
+            return;
+        }
 
         // Enable pretty-printing for arrays of objects/arrays, or inherit from pretty-printed parent
         let next_is_complex = matches!(next.map(|n| n.text.as_str()), Some("{") | Some("["));
@@ -511,7 +533,12 @@ impl<'a> Formatter<'a> {
             .last()
             .copied()
             .unwrap_or(false);
-        let should_pretty_print = next_is_complex || parent_is_pretty;
+
+        // Estimate if array content would exceed 100 chars on one line
+        let estimated_length = self.estimate_array_length(remaining);
+        let would_be_too_long = estimated_length > 100;
+
+        let should_pretty_print = next_is_complex || parent_is_pretty || would_be_too_long;
 
         if should_pretty_print {
             self.push_newline();
@@ -521,30 +548,44 @@ impl<'a> Formatter<'a> {
             self.bracket_indent_bump_stack.push(false);
         }
         self.prev = Some(token.clone());
+        self.array_start_indices.push(self.output.len());
     }
 
     fn write_close_bracket(&mut self, token: &Token) {
         if self.bracket_depth > 0 {
             self.bracket_depth -= 1;
         }
-        // Remove any indentation bump we added for an array with pretty-printing
+
+        // Pop the array start position (we don't use it anymore but need to keep stack in sync)
+        self.array_start_indices.pop();
+
         let was_pretty = self.bracket_indent_bump_stack.pop().unwrap_or(false);
-        if was_pretty && self.indent_level > 0 {
-            self.indent_level -= 1;
-        }
-        // Add newline before ] to separate ]] or }] onto different lines
-        if was_pretty && !self.output.ends_with('\n') {
-            let parent_is_pretty = self
-                .bracket_indent_bump_stack
-                .last()
-                .copied()
-                .unwrap_or(false);
-            let prev_is_closing = self
-                .prev
-                .as_ref()
-                .is_some_and(|p| matches!(p.text.as_str(), "]" | "}"));
-            if parent_is_pretty || prev_is_closing {
-                self.push_newline();
+        if was_pretty {
+            if self.indent_level > 0 {
+                self.indent_level -= 1;
+            }
+            // Add newline before ] for pretty-printed arrays, but only if we're not
+            // already on a newline and if the previous token suggests we should (e.g., after array element, not in middle of expression)
+            if !self.output.ends_with('\n') {
+                let parent_is_pretty = self
+                    .bracket_indent_bump_stack
+                    .last()
+                    .copied()
+                    .unwrap_or(false);
+                let prev_is_closing = self
+                    .prev
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.text.as_str(), "]" | "}"));
+                // Also add newline if prev is identifier, number, string (typical array elements)
+                let prev_is_value = self.prev.as_ref().is_some_and(|p| {
+                    matches!(
+                        p.kind,
+                        TokenKind::Identifier | TokenKind::Number | TokenKind::String
+                    )
+                });
+                if parent_is_pretty || prev_is_closing || prev_is_value {
+                    self.push_newline();
+                }
             }
         }
         self.ensure_indent();
@@ -685,6 +726,51 @@ impl<'a> Formatter<'a> {
         self.needs_indent = true;
         self.pending_space = false;
         self.prev = None;
+    }
+
+    fn estimate_array_length(&self, remaining: &[Token]) -> usize {
+        let mut length = 1; // Opening '['
+        let mut depth = 0; // Track nested brackets (starts at 0, first ']' we encounter closes our array)
+        let mut prev_text = "[";
+
+        for token in remaining {
+            // If we hit the closing bracket at depth 0, we're done
+            if token.text == "]" && depth == 0 {
+                length += 1; // Closing ']'
+                break;
+            }
+
+            match token.text.as_str() {
+                "[" => depth += 1,
+                "]" => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+
+            // Skip blanklines and comments for estimation
+            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
+                continue;
+            }
+
+            // Estimate token length
+            length += token.text.len();
+
+            // Add space for separators
+            if token.text == "," {
+                length += 1; // space after comma
+            } else if !matches!(prev_text, "[" | "(" | "{" | "." | "::")
+                && !matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::")
+            {
+                length += 1; // potential space between tokens
+            }
+
+            prev_text = &token.text;
+        }
+
+        length
     }
 }
 
