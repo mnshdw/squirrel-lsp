@@ -77,17 +77,47 @@ enum TokenKind {
     Blankline,
 }
 
+#[derive(Debug, Clone)]
+struct PrevToken {
+    text: String,
+    kind: TokenKind,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BraceContext {
-    Object,
+enum BraceKind {
+    ObjectInline,
+    ObjectMultiline,
     Block,
+}
+
+impl BraceKind {
+    fn is_object(self) -> bool {
+        matches!(self, BraceKind::ObjectInline | BraceKind::ObjectMultiline)
+    }
+
+    fn is_inline(self) -> bool {
+        matches!(self, BraceKind::ObjectInline)
+    }
 }
 
 #[derive(Clone, Copy)]
 struct BraceFrame {
-    context: BraceContext,
-    inline: bool,
+    kind: BraceKind,
     paren_depth_at_open: usize,
+    bracket_depth_at_open: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ParenKind {
+    For,
+    If,
+    Function,
+    Regular,
+}
+
+#[derive(Clone, Copy)]
+struct ParenFrame {
+    kind: ParenKind,
     bracket_depth_at_open: usize,
 }
 
@@ -130,19 +160,13 @@ struct Formatter<'a> {
     needs_indent: bool,
     pending_space: bool,
     prev_was_unary: bool,
-    prev: Option<Token>,
+    prev: Option<PrevToken>,
     braces: Vec<BraceFrame>,
-    paren_stack: Vec<bool>,
-    // Tracks whether a paren belongs to an `if` header
-    if_stack: Vec<bool>,
+    parens: Vec<ParenFrame>,
     // Track auto-inserted blocks (for single-statement ifs) to close on ';'
     auto_brace_stack: Vec<bool>,
-    // Tracks whether a paren belongs to a `function` parameter list
-    func_paren_stack: Vec<bool>,
     // Tracks whether we increased indentation after an array '[' for pretty-printing
     bracket_indent_bump_stack: Vec<bool>,
-    // Tracks the bracket_depth when each paren was opened
-    paren_bracket_depth_stack: Vec<usize>,
     // Tracks the output position where each '[' was written
     array_start_indices: Vec<usize>,
 }
@@ -160,12 +184,9 @@ impl<'a> Formatter<'a> {
             prev_was_unary: false,
             prev: None,
             braces: Vec::new(),
-            paren_stack: Vec::new(),
-            if_stack: Vec::new(),
+            parens: Vec::new(),
             auto_brace_stack: Vec::new(),
-            func_paren_stack: Vec::new(),
             bracket_indent_bump_stack: Vec::new(),
-            paren_bracket_depth_stack: Vec::new(),
             array_start_indices: Vec::new(),
         }
     }
@@ -206,13 +227,58 @@ impl<'a> Formatter<'a> {
         }
     }
 
+    fn ends_with_whitespace(&self) -> bool {
+        matches!(
+            self.output.chars().last(),
+            Some(' ') | Some('\n') | Some('\t')
+        )
+    }
+
+    fn in_for_header(&self) -> bool {
+        self.paren_depth > 0
+            && self
+                .parens
+                .last()
+                .is_some_and(|f| matches!(f.kind, ParenKind::For))
+    }
+
+    fn in_if_condition(&self) -> bool {
+        self.paren_depth > 0 && self.parens.iter().any(|f| matches!(f.kind, ParenKind::If))
+    }
+
+    fn in_function_params(&self) -> bool {
+        self.paren_depth > 0
+            && self
+                .parens
+                .last()
+                .is_some_and(|f| matches!(f.kind, ParenKind::Function))
+    }
+
+    fn in_object_top_level(&self) -> bool {
+        self.braces.last().is_some_and(|f| {
+            f.kind == BraceKind::ObjectMultiline
+                && f.paren_depth_at_open == self.paren_depth
+                && f.bracket_depth_at_open == self.bracket_depth
+        })
+    }
+
+    fn in_pretty_array(&self) -> bool {
+        let paren_bracket_depth = self
+            .parens
+            .last()
+            .map(|f| f.bracket_depth_at_open)
+            .unwrap_or(0);
+        let bracket_opened_in_paren =
+            self.paren_depth > 0 && self.bracket_depth > paren_bracket_depth;
+        self.bracket_indent_bump_stack
+            .last()
+            .copied()
+            .unwrap_or(false)
+            && (self.paren_depth == 0 || bracket_opened_in_paren)
+    }
+
     fn apply_pending_space(&mut self) {
-        if self.pending_space
-            && !matches!(
-                self.output.chars().last(),
-                Some(' ') | Some('\n') | Some('\t')
-            )
-        {
+        if self.pending_space && !self.ends_with_whitespace() {
             self.output.push(' ');
         }
         self.pending_space = false;
@@ -230,15 +296,19 @@ impl<'a> Formatter<'a> {
         self.prev = None;
     }
 
+    fn set_prev(&mut self, token: &Token) {
+        self.prev = Some(PrevToken {
+            text: token.text.clone(),
+            kind: token.kind,
+        });
+    }
+
     fn prepare_token(&mut self, token: &Token) {
         self.ensure_indent();
         self.apply_pending_space();
         if !self.prev_was_unary
             && needs_space(self.prev.as_ref(), token)
-            && !matches!(
-                self.output.chars().last(),
-                Some(' ') | Some('\n') | Some('\t')
-            )
+            && !self.ends_with_whitespace()
         {
             self.output.push(' ');
         }
@@ -250,33 +320,32 @@ impl<'a> Formatter<'a> {
 
     fn write_open_brace(&mut self, token: &Token, next: Option<&Token>) {
         self.prepare_token(token);
-        // Determine brace context (object literal vs code block)
-        let is_block = match self.prev.as_ref() {
-            Some(p) => p.text == ")" || matches!(p.kind, TokenKind::Keyword),
-            None => false,
-        };
-        let context = if is_block {
-            BraceContext::Block
+
+        // Determine brace kind (object literal vs code block, inline vs multiline)
+        let is_block = self
+            .prev
+            .as_ref()
+            .is_some_and(|p| p.text == ")" || matches!(p.kind, TokenKind::Keyword));
+
+        let kind = if is_block {
+            BraceKind::Block
+        } else if matches!(next.map(|n| n.text.as_str()), Some("}")) {
+            BraceKind::ObjectInline
         } else {
-            BraceContext::Object
+            BraceKind::ObjectMultiline
         };
 
-        let inline =
-            matches!(next.map(|n| n.text.as_str()), Some("}")) && context == BraceContext::Object;
-
-        // Write '{' first
         self.output.push('{');
 
-        // Push frame and manage indentation/newline
         self.braces.push(BraceFrame {
-            context,
-            inline,
+            kind,
             paren_depth_at_open: self.paren_depth,
             bracket_depth_at_open: self.bracket_depth,
         });
-        if inline {
+
+        if kind.is_inline() {
             // Keep {} inline (no indent or newline)
-            self.prev = Some(token.clone());
+            self.set_prev(token);
             return;
         }
 
@@ -286,13 +355,12 @@ impl<'a> Formatter<'a> {
 
     fn write_close_brace(&mut self, token: &Token, next: Option<&Token>) {
         let frame = self.braces.pop();
-        let inline = frame.map(|f| f.inline).unwrap_or(false);
-        let is_object = frame
-            .map(|f| f.context == BraceContext::Object)
-            .unwrap_or(false);
+        let kind = frame.map(|f| f.kind);
+        let inline = kind.is_some_and(|k| k.is_inline());
+        let is_object = kind.is_some_and(|k| k.is_object());
 
-        if self.indent_level > 0 && !inline {
-            self.indent_level -= 1;
+        if !inline {
+            self.indent_level = self.indent_level.saturating_sub(1);
         }
         if !self.output.ends_with('\n') && !inline {
             self.push_newline();
@@ -317,10 +385,10 @@ impl<'a> Formatter<'a> {
             self.write_blankline();
             self.ensure_indent();
             self.output.push('}');
-            if needs_array_indent && self.indent_level > 0 {
-                self.indent_level -= 1;
+            if needs_array_indent {
+                self.indent_level = self.indent_level.saturating_sub(1);
             }
-            self.prev = Some(token.clone());
+            self.set_prev(token);
             self.needs_indent = false;
             return;
         }
@@ -328,10 +396,10 @@ impl<'a> Formatter<'a> {
         // Default: emit closing brace
         self.ensure_indent();
         self.output.push('}');
-        if needs_array_indent && self.indent_level > 0 {
-            self.indent_level -= 1;
+        if needs_array_indent {
+            self.indent_level = self.indent_level.saturating_sub(1);
         }
-        self.prev = Some(token.clone());
+        self.set_prev(token);
 
         // Determine what follows the brace
         if let Some(next_token) = next {
@@ -380,15 +448,13 @@ impl<'a> Formatter<'a> {
             if !matches!(self.output.chars().last(), Some(' ') | Some('\t')) {
                 self.output.push(' ');
             }
-            self.prev = Some(token.clone());
+            self.set_prev(token);
             return;
         }
 
-        let in_for_header =
-            self.paren_depth > 0 && self.paren_stack.last().copied().unwrap_or(false);
-        if in_for_header {
+        if self.in_for_header() {
             self.output.push(' ');
-            self.prev = Some(token.clone());
+            self.set_prev(token);
         } else {
             self.push_newline();
         }
@@ -408,35 +474,15 @@ impl<'a> Formatter<'a> {
     fn write_comma(&mut self, token: &Token, next: Option<&Token>) {
         self.prepare_token(token);
 
-        let in_object_top_level = self.braces.last().is_some_and(|f| {
-            f.context == BraceContext::Object
-                && !f.inline
-                && f.paren_depth_at_open == self.paren_depth
-                && f.bracket_depth_at_open == self.bracket_depth
-        });
-        let in_function_params =
-            self.func_paren_stack.last().copied().unwrap_or(false) && self.paren_depth > 0;
-
-        // Apply pretty-array formatting if we're in a pretty-printed array
-        // and the bracket depth has increased since any containing paren was opened
-        let paren_bracket_depth = self
-            .paren_bracket_depth_stack
-            .last()
-            .copied()
-            .unwrap_or(0);
-        let bracket_opened_in_paren = self.paren_depth > 0 && self.bracket_depth > paren_bracket_depth;
-        let in_pretty_array = self
-            .bracket_indent_bump_stack
-            .last()
-            .copied()
-            .unwrap_or(false)
-            && (self.paren_depth == 0 || bracket_opened_in_paren);
+        let in_object_top_level = self.in_object_top_level();
+        let in_function_params = self.in_function_params();
+        let in_pretty_array = self.in_pretty_array();
 
         // Skip trailing commas in objects (but allow them in arrays)
         let is_trailing = matches!(next.map(|t| t.text.as_str()), Some("}"));
         if is_trailing && in_object_top_level && !in_function_params {
             self.push_newline();
-            self.prev = Some(token.clone());
+            self.set_prev(token);
             return;
         }
 
@@ -456,7 +502,7 @@ impl<'a> Formatter<'a> {
                 self.output.push(' ');
             }
         }
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_open_paren(&mut self, token: &Token, _remaining: &[Token]) {
@@ -464,25 +510,27 @@ impl<'a> Formatter<'a> {
         self.output.push('(');
         self.paren_depth += 1;
 
-        let prev_text = self.prev.as_ref().map(|p| p.text.as_str());
-        let is_if = prev_text == Some("if");
+        let kind = match self.prev.as_ref().map(|p| p.text.as_str()) {
+            Some("for") => ParenKind::For,
+            Some("if") => ParenKind::If,
+            Some("function") => ParenKind::Function,
+            _ => ParenKind::Regular,
+        };
 
-        self.paren_stack.push(prev_text == Some("for"));
-        self.if_stack.push(is_if);
-        self.func_paren_stack.push(prev_text == Some("function"));
-        self.paren_bracket_depth_stack.push(self.bracket_depth);
+        self.parens.push(ParenFrame {
+            kind,
+            bracket_depth_at_open: self.bracket_depth,
+        });
 
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_close_paren(&mut self, token: &Token, next: Option<&Token>) {
-        if self.paren_depth > 0 {
-            self.paren_depth -= 1;
-        }
-        self.paren_stack.pop();
-        self.func_paren_stack.pop();
-        self.paren_bracket_depth_stack.pop();
-        let is_if_header = self.if_stack.pop().unwrap_or(false);
+        self.paren_depth = self.paren_depth.saturating_sub(1);
+        let is_if_header = self
+            .parens
+            .pop()
+            .is_some_and(|f| matches!(f.kind, ParenKind::If));
 
         self.ensure_indent();
         self.apply_pending_space();
@@ -503,7 +551,7 @@ impl<'a> Formatter<'a> {
             self.write_open_brace(&synthetic, next);
             self.auto_brace_stack.push(true);
         }
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_open_bracket(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
@@ -524,7 +572,7 @@ impl<'a> Formatter<'a> {
 
         if is_subscript || is_empty {
             self.bracket_indent_bump_stack.push(false);
-            self.prev = Some(token.clone());
+            self.set_prev(token);
             self.array_start_indices.push(self.output.len());
             return;
         }
@@ -550,23 +598,19 @@ impl<'a> Formatter<'a> {
         } else {
             self.bracket_indent_bump_stack.push(false);
         }
-        self.prev = Some(token.clone());
+        self.set_prev(token);
         self.array_start_indices.push(self.output.len());
     }
 
     fn write_close_bracket(&mut self, token: &Token) {
-        if self.bracket_depth > 0 {
-            self.bracket_depth -= 1;
-        }
+        self.bracket_depth = self.bracket_depth.saturating_sub(1);
 
         // Pop the array start position (we don't use it anymore but need to keep stack in sync)
         self.array_start_indices.pop();
 
         let was_pretty = self.bracket_indent_bump_stack.pop().unwrap_or(false);
         if was_pretty {
-            if self.indent_level > 0 {
-                self.indent_level -= 1;
-            }
+            self.indent_level = self.indent_level.saturating_sub(1);
             // Add newline before ] for pretty-printed arrays, but only if we're not
             // already on a newline and if the previous token suggests we should (e.g., after array element, not in middle of expression)
             if !self.output.ends_with('\n') {
@@ -594,7 +638,7 @@ impl<'a> Formatter<'a> {
         self.ensure_indent();
         self.apply_pending_space();
         self.output.push(']');
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_member_access(&mut self, token: &Token) {
@@ -607,7 +651,7 @@ impl<'a> Formatter<'a> {
             self.output.pop();
         }
         self.output.push_str(&token.text);
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_question(&mut self, token: &Token) {
@@ -617,7 +661,7 @@ impl<'a> Formatter<'a> {
         }
         self.output.push('?');
         self.output.push(' ');
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_colon(&mut self, token: &Token, next: Option<&Token>) {
@@ -642,13 +686,13 @@ impl<'a> Formatter<'a> {
         if should_space {
             self.output.push(' ');
         }
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_increment(&mut self, token: &Token) {
         self.prepare_token(token);
         self.output.push_str(&token.text);
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_operator(&mut self, token: &Token, remaining: &[Token]) {
@@ -658,17 +702,14 @@ impl<'a> Formatter<'a> {
             // Mark that the previous token was a unary operator so the next token doesn't
             // get a space inserted after it.
             self.prev_was_unary = true;
-            self.prev = Some(token.clone());
+            self.set_prev(token);
             return;
         }
 
         // Check if we should break line for logical operators in if conditions
         let is_logical_op = matches!(token.text.as_str(), "&&" | "||");
-        // Check if ANY enclosing paren is an if - we'll break at the outermost logical operator
-        let in_if_condition = self.paren_depth > 0
-            && self.if_stack.iter().any(|&is_if| is_if);
 
-        if is_logical_op && in_if_condition {
+        if is_logical_op && self.in_if_condition() {
             // Check if keeping the rest of the condition on one line would exceed 100 chars
             let current_line_length = self.get_current_line_length();
             let rest_of_condition_length = self.estimate_length_to_paren_close(remaining);
@@ -680,10 +721,10 @@ impl<'a> Formatter<'a> {
                 // Add extra indentation for continuation line
                 self.indent_level += 1;
                 self.ensure_indent();
-                self.indent_level -= 1;
+                self.indent_level = self.indent_level.saturating_sub(1);
                 self.output.push_str(&token.text);
                 self.pending_space = true;
-                self.prev = Some(token.clone());
+                self.set_prev(token);
                 return;
             }
         }
@@ -694,7 +735,7 @@ impl<'a> Formatter<'a> {
         }
         self.output.push_str(&token.text);
         self.pending_space = true;
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_comment(&mut self, token: &Token) {
@@ -735,13 +776,13 @@ impl<'a> Formatter<'a> {
             self.output.push(' ');
         }
         self.output.push_str(&text);
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_default(&mut self, token: &Token) {
         self.prepare_token(token);
         self.output.push_str(&token.text);
-        self.prev = Some(token.clone());
+        self.set_prev(token);
     }
 
     fn write_blankline(&mut self) {
@@ -755,6 +796,20 @@ impl<'a> Formatter<'a> {
         self.needs_indent = true;
         self.pending_space = false;
         self.prev = None;
+    }
+
+    fn estimate_token_spacing(&self, prev_text: &str, token: &Token) -> usize {
+        if token.text == "," {
+            1 // space after comma
+        } else if is_operator(&token.text) {
+            2 // spaces around operators
+        } else if !matches!(prev_text, "[" | "(" | "{" | "." | "::")
+            && !matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::")
+        {
+            1 // potential space between tokens
+        } else {
+            0
+        }
     }
 
     fn estimate_array_length(&self, remaining: &[Token]) -> usize {
@@ -775,8 +830,8 @@ impl<'a> Formatter<'a> {
                     if depth > 0 {
                         depth -= 1;
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
 
             // Skip blanklines and comments for estimation
@@ -784,18 +839,8 @@ impl<'a> Formatter<'a> {
                 continue;
             }
 
-            // Estimate token length
             length += token.text.len();
-
-            // Add space for separators
-            if token.text == "," {
-                length += 1; // space after comma
-            } else if !matches!(prev_text, "[" | "(" | "{" | "." | "::")
-                && !matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::")
-            {
-                length += 1; // potential space between tokens
-            }
-
+            length += self.estimate_token_spacing(prev_text, token);
             prev_text = &token.text;
         }
 
@@ -833,28 +878,17 @@ impl<'a> Formatter<'a> {
                     } else {
                         break; // Hit closing paren at depth 0
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
 
-            // Estimate token length
             length += token.text.len();
-
-            // Add space for operators and separators
-            if is_operator(&token.text) {
-                length += 2; // spaces around operators
-            } else if !matches!(prev_text, "[" | "(" | "{" | "." | "::")
-                && !matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::")
-            {
-                length += 1; // potential space between tokens
-            }
-
+            length += self.estimate_token_spacing(prev_text, token);
             prev_text = &token.text;
         }
 
         length
     }
-
 }
 
 fn trim_trailing_whitespace(buffer: &mut String) {
@@ -977,7 +1011,7 @@ fn is_keyword_kind(kind: &str) -> bool {
     )
 }
 
-fn needs_space(prev: Option<&Token>, current: &Token) -> bool {
+fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
     let prev = match prev {
         Some(prev) => prev,
         None => return false,
@@ -1083,7 +1117,7 @@ fn is_unary_operator(text: &str) -> bool {
     matches!(text, "-" | "+" | "!" | "~")
 }
 
-fn is_unary_context(prev: Option<&Token>) -> bool {
+fn is_unary_context(prev: Option<&PrevToken>) -> bool {
     match prev {
         None => true,
         Some(prev) => {
