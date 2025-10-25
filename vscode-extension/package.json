@@ -2,7 +2,7 @@
   "name": "squirrel-lsp-vscode",
   "displayName": "Squirrel Language Server Client",
   "description": "A VSCode extension providing LSP support for the Squirrel language via the squirrel-lsp server.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "mnshdw",
   "license": "MIT",
   "repository": {
