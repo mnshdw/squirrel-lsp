@@ -140,6 +140,8 @@ struct Formatter<'a> {
     func_paren_stack: Vec<bool>,
     // Tracks whether we increased indentation after an array '[' for pretty-printing
     bracket_indent_bump_stack: Vec<bool>,
+    // Tracks the bracket_depth when each paren was opened
+    paren_bracket_depth_stack: Vec<usize>,
 }
 
 impl<'a> Formatter<'a> {
@@ -160,6 +162,7 @@ impl<'a> Formatter<'a> {
             auto_brace_stack: Vec::new(),
             func_paren_stack: Vec::new(),
             bracket_indent_bump_stack: Vec::new(),
+            paren_bracket_depth_stack: Vec::new(),
         }
     }
 
@@ -410,11 +413,20 @@ impl<'a> Formatter<'a> {
         let in_function_params =
             self.func_paren_stack.last().copied().unwrap_or(false) && self.paren_depth > 0;
 
+        // Apply pretty-array formatting if we're in a pretty-printed array
+        // and the bracket depth has increased since any containing paren was opened
+        let paren_bracket_depth = self
+            .paren_bracket_depth_stack
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let bracket_opened_in_paren = self.paren_depth > 0 && self.bracket_depth > paren_bracket_depth;
         let in_pretty_array = self
             .bracket_indent_bump_stack
             .last()
             .copied()
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && (self.paren_depth == 0 || bracket_opened_in_paren);
 
         // Skip trailing commas in objects (but allow them in arrays)
         let is_trailing = matches!(next.map(|t| t.text.as_str()), Some("}"));
@@ -452,6 +464,7 @@ impl<'a> Formatter<'a> {
         self.paren_stack.push(prev_text == Some("for"));
         self.if_stack.push(prev_text == Some("if"));
         self.func_paren_stack.push(prev_text == Some("function"));
+        self.paren_bracket_depth_stack.push(self.bracket_depth);
         self.prev = Some(token.clone());
     }
 
@@ -461,6 +474,7 @@ impl<'a> Formatter<'a> {
         }
         self.paren_stack.pop();
         self.func_paren_stack.pop();
+        self.paren_bracket_depth_stack.pop();
         let is_if_header = self.if_stack.pop().unwrap_or(false);
 
         self.ensure_indent();
