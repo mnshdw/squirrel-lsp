@@ -7,12 +7,14 @@ use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, InitializeParams, InitializeResult, MessageType, OneOf, Position,
-    Range, ServerCapabilities, ServerInfo, TextDocumentContentChangeEvent,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
+    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentFormattingParams, InitializeParams, InitializeResult,
+    MessageType, OneOf, Position, Range, ServerCapabilities, ServerInfo,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
+use tree_sitter::Parser;
 
 struct Backend {
     client: Client,
@@ -41,7 +43,6 @@ impl Backend {
         };
 
         let mut format_options = FormatOptions::with_indent(indent_style);
-        // overwrite defaults with user-provided preferences when available
         format_options.insert_final_newline = options.insert_final_newline.unwrap_or(true);
         format_options.trim_trailing_whitespace = options.trim_trailing_whitespace.unwrap_or(true);
         format_options
@@ -65,11 +66,12 @@ impl Backend {
                 }
                 let edit = TextEdit::new(full_range(&original), formatted);
                 Ok(Some(vec![edit]))
-            }
+            },
             Err(err) => {
                 self.report_format_error(&err).await;
+                self.publish_syntax_diagnostics(uri, &original).await;
                 Ok(None)
-            }
+            },
         }
     }
 
@@ -119,16 +121,25 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let mut store = self.documents.write().await;
-        store.insert(params.text_document.uri, params.text_document.text);
+        let uri = params.text_document.uri;
+        let text = params.text_document.text;
+        store.insert(uri.clone(), text.clone());
+        self.publish_syntax_diagnostics(uri, &text).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let mut store = self.documents.write().await;
-        if let Some(entry) = store.get_mut(&params.text_document.uri)
+        let uri = params.text_document.uri;
+        if let Some(entry) = store.get_mut(&uri)
             && let Some(TextDocumentContentChangeEvent { text, .. }) =
                 params.content_changes.into_iter().next_back()
         {
             *entry = text;
+            // Re-run diagnostics after change
+            let current = entry.clone();
+            drop(store);
+            self.publish_syntax_diagnostics(uri, &current).await;
+            return;
         }
     }
 
@@ -154,6 +165,108 @@ fn full_range(text: &str) -> Range {
         }
     }
     Range::new(Position::new(0, 0), Position::new(line, character))
+}
+
+fn position_at(text: &str, byte_offset: usize) -> Position {
+    // Clamp to valid byte boundary
+    let byte_offset = byte_offset.min(text.len());
+    let mut line = 0u32;
+    let mut col_utf16 = 0u32;
+    let mut bytes_seen = 0usize;
+    for ch in text.chars() {
+        let ch_bytes = ch.len_utf8();
+        if bytes_seen >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col_utf16 = 0;
+        } else {
+            col_utf16 += ch.len_utf16() as u32;
+        }
+        bytes_seen += ch_bytes;
+    }
+    Position::new(line, col_utf16)
+}
+
+impl Backend {
+    async fn publish_syntax_diagnostics(&self, uri: Url, text: &str) {
+        let diags = match compute_syntax_diagnostics(text) {
+            Ok(d) => d,
+            Err(e) => {
+                self.client
+                    .log_message(MessageType::ERROR, format!("Failed to parse: {e}"))
+                    .await;
+                Vec::new()
+            },
+        };
+        self.client.publish_diagnostics(uri, diags, None).await;
+    }
+}
+
+fn compute_syntax_diagnostics(text: &str) -> std::result::Result<Vec<Diagnostic>, String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(tree_sitter_squirrel::language())
+        .map_err(|e| e.to_string())?;
+    let Some(tree) = parser.parse(text, None) else {
+        return Ok(Vec::new());
+    };
+    let root = tree.root_node();
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut cursor = root.walk();
+    let mut visited_children = false;
+    loop {
+        let node = cursor.node();
+        if node.is_error() || node.is_missing() || node.kind() == "ERROR" {
+            let start = node.start_byte();
+            let mut end = node.end_byte();
+            if end <= start {
+                end = (start + 1).min(text.len());
+            }
+            let range = Range::new(position_at(text, start), position_at(text, end));
+
+            let msg = if node.is_missing() {
+                format!("Missing {}", node.kind())
+            } else {
+                let snippet = &text[start..end];
+                let first = snippet.lines().next().unwrap_or("").trim();
+                if first.is_empty() {
+                    "Unexpected input".to_string()
+                } else {
+                    let display = if first.len() > 40 {
+                        format!("{}…", &first[..40])
+                    } else {
+                        first.to_string()
+                    };
+                    format!("Unexpected '{}'", display)
+                }
+            };
+
+            diags.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("squirrel-parser".to_string()),
+                message: msg,
+                ..Diagnostic::default()
+            });
+        }
+
+        if !visited_children && cursor.goto_first_child() {
+            visited_children = false;
+            continue;
+        }
+        if cursor.goto_next_sibling() {
+            visited_children = false;
+            continue;
+        }
+        if !cursor.goto_parent() {
+            break;
+        }
+        visited_children = true;
+    }
+    Ok(diags)
 }
 
 #[tokio::main]

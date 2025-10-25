@@ -15,8 +15,10 @@ tower-lsp = "0.20"
 tree-sitter = "0.20"
 tree-sitter-squirrel = "1.0"
 
+[dev-dependencies]
+pretty_assertions = "1"
+
 [workspace.lints.clippy]
-# You can disagree with lints locally, but you _must_ provide a reason
 allow_attributes_without_reason = "deny"
 pedantic = { level = "warn", priority = -1 }
 perf = { level = "deny", priority = 1 }

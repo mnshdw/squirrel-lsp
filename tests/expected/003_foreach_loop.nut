@@ -1,0 +1,3 @@
+foreach (a in actors) {
+    print(a);
+}
