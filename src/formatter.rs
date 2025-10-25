@@ -329,7 +329,7 @@ impl<'a> Formatter<'a> {
         // Determine what follows the brace
         if let Some(next_token) = next {
             match next_token.text.as_str() {
-                ")" | ";" => {
+                ")" | ";" | "," => {
                     self.needs_indent = false;
                     return;
                 },
@@ -400,7 +400,6 @@ impl<'a> Formatter<'a> {
 
     fn write_comma(&mut self, token: &Token, next: Option<&Token>) {
         self.prepare_token(token);
-        self.output.push(',');
 
         let in_object_top_level = self.braces.last().is_some_and(|f| {
             f.context == BraceContext::Object
@@ -416,6 +415,16 @@ impl<'a> Formatter<'a> {
             .last()
             .copied()
             .unwrap_or(false);
+
+        // Skip trailing commas in objects (but allow them in arrays)
+        let is_trailing = matches!(next.map(|t| t.text.as_str()), Some("}"));
+        if is_trailing && in_object_top_level && !in_function_params {
+            self.push_newline();
+            self.prev = Some(token.clone());
+            return;
+        }
+
+        self.output.push(',');
 
         if in_object_top_level && !in_function_params {
             match next {
