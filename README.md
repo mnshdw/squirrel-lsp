@@ -12,7 +12,8 @@ You need two pieces:
 
 1. VS Code extension (client)
 
-- Install the packaged VSIX from `vscode-extension/squirrel-lsp-vscode-<version>.vsix`.
+- Download the VSIX package (`squirrel-lsp-vscode-<version>.vsix`) from the [GitHub Releases](https://github.com/antmx/squirrel-lsp/releases) page.
+- Install it in VS Code:
   - In VS Code: Extensions panel → … → "Install from VSIX…"
   - Or in a terminal:
     ```bash
@@ -38,9 +39,9 @@ Choose one of the following:
 
 ### A) Download prebuilt binaries (recommended)
 
-- This repository provides release binaries for major platforms (Windows, macOS [Intel & Apple Silicon], Linux x86_64).
+- Download prebuilt binaries for your platform (Windows, macOS [Intel & Apple Silicon], Linux x86_64) from the [GitHub Releases](https://github.com/antmx/squirrel-lsp/releases) page.
 
-Artifacts are named by platform, for example:
+Binaries are named by platform, for example:
 
 - `squirrel-lsp-windows-x86_64.exe`
 - `squirrel-lsp-macos-aarch64`
@@ -73,7 +74,7 @@ The binary will be at:
 Setting: "Squirrel LSP: Server Path" (`squirrelLsp.serverPath`)
 
 - Absolute path to the `squirrel-lsp` executable.
-- Leave empty to let the extension search the workspace `target/release` or `target/debug` and then your PATH.
+- Leave empty to let the extension search your PATH (or workspace build directories if developing).
 
 Command: "Squirrel LSP: Restart Server"
 
