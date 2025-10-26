@@ -76,6 +76,8 @@ jobs:
     name: package vscode extension (vsix)
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
@@ -125,6 +127,29 @@ jobs:
             cp artifacts/squirrel-lsp-windows-aarch64/squirrel-lsp.exe vscode-extension/bin/win32-arm64/squirrel-lsp.exe
           fi
 
+      - name: Prepare release assets directory
+        run: |
+          set -eux
+          mkdir -p release-assets
+          if [ -f artifacts/squirrel-lsp-linux-x86_64/squirrel-lsp ]; then
+            cp artifacts/squirrel-lsp-linux-x86_64/squirrel-lsp release-assets/squirrel-lsp-linux-x86_64
+          fi
+          if [ -f artifacts/squirrel-lsp-linux-aarch64/squirrel-lsp ]; then
+            cp artifacts/squirrel-lsp-linux-aarch64/squirrel-lsp release-assets/squirrel-lsp-linux-aarch64
+          fi
+          if [ -f artifacts/squirrel-lsp-macos-x86_64/squirrel-lsp ]; then
+            cp artifacts/squirrel-lsp-macos-x86_64/squirrel-lsp release-assets/squirrel-lsp-macos-x86_64
+          fi
+          if [ -f artifacts/squirrel-lsp-macos-aarch64/squirrel-lsp ]; then
+            cp artifacts/squirrel-lsp-macos-aarch64/squirrel-lsp release-assets/squirrel-lsp-macos-aarch64
+          fi
+          if [ -f artifacts/squirrel-lsp-windows-x86_64/squirrel-lsp.exe ]; then
+            cp artifacts/squirrel-lsp-windows-x86_64/squirrel-lsp.exe release-assets/squirrel-lsp-windows-x86_64.exe
+          fi
+          if [ -f artifacts/squirrel-lsp-windows-aarch64/squirrel-lsp.exe ]; then
+            cp artifacts/squirrel-lsp-windows-aarch64/squirrel-lsp.exe release-assets/squirrel-lsp-windows-aarch64.exe
+          fi
+
       - name: Install dependencies
         working-directory: vscode-extension
         run: npm ci
@@ -136,6 +161,24 @@ jobs:
       - name: Package VSIX
         working-directory: vscode-extension
         run: npm run -s package
+
+      - name: Collect VSIX into release assets and checksums
+        run: |
+          set -eux
+          cp vscode-extension/*.vsix release-assets/
+          (cd release-assets && for f in *; do sha256sum "$f" > "$f.sha256"; done)
+
+      - name: Create GitHub Release and upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/** --clobber
+          else
+            gh release create "$TAG" release-assets/** --generate-notes --title "$TAG"
+          fi
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
