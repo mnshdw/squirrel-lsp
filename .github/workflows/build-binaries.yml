@@ -48,13 +48,14 @@ jobs:
         if: ${{ startsWith(matrix.os, 'ubuntu') && matrix.target == 'aarch64-unknown-linux-gnu' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Build release
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           cargo build --release --target ${{ matrix.target }}
 
