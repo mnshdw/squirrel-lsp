@@ -3,4 +3,3 @@ node_modules/
 **/*.ts
 **/*.map
 src/
-README.md

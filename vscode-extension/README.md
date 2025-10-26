@@ -1,6 +1,6 @@
 # Squirrel Language Server
 
-Language Server Protocol (LSP) support for Squirrel `.nut` files in VS Code. Provides code formatting capabilities powered by the Rust-based `squirrel-lsp` server.
+Language Server Protocol (LSP) support for Squirrel `.nut` files in VS Code. Formatting powered by the Rust-based `squirrel-lsp` server.
 
 ## Features
 
@@ -9,40 +9,21 @@ Language Server Protocol (LSP) support for Squirrel `.nut` files in VS Code. Pro
 
 ## Installation
 
-### 1. Install the VS Code Extension
-
-Install directly from the VS Code Marketplace:
+Install from the VS Code Marketplace:
 
 - Open VS Code Extensions panel (`Ctrl+Shift+X` / `Cmd+Shift+X`)
 - Search for "Squirrel Language Server"
 - Click "Install"
 
-Or install via command line:
+Or via command line:
+
 ```bash
 code --install-extension mnshdw.squirrel-lsp-vscode
 ```
 
-### 2. Install the Language Server Binary
+No extra setup is required, the extension bundles prebuilt server binaries for the major platforms and will start the right one automatically.
 
-Download the prebuilt `squirrel-lsp` binary for your platform from [GitHub Releases](https://github.com/mnshdw/squirrel-lsp/releases):
-
-- `squirrel-lsp-windows-x86_64.exe` (Windows)
-- `squirrel-lsp-macos-aarch64` (macOS Apple Silicon)
-- `squirrel-lsp-macos-x86_64` (macOS Intel)
-- `squirrel-lsp-linux-x86_64` (Linux)
-
-On Unix-like systems, make the binary executable:
-```bash
-chmod +x /path/to/squirrel-lsp
-```
-
-### 3. Configure the Extension
-
-Set the binary path in VS Code settings:
-
-- Open Settings → search "Squirrel LSP: Server Path"
-- Enter the absolute path to your `squirrel-lsp` binary
-- Or place the binary in your `PATH` and leave the setting empty
+Advanced: to use a custom server, set Settings → "Squirrel LSP: Server Path" (`squirrelLsp.serverPath`). If left empty, the bundled binary is used; the extension also falls back to PATH.
 
 ## Usage
 
@@ -60,18 +41,24 @@ Open any `.nut` file to activate the extension. Use **Format Document** (`Shift+
 
 - **Squirrel LSP: Restart Server** – Manually restart the language server (useful after updating the binary)
 
+## Supported platforms (bundled)
+
+- Windows: x64, ARM64
+- macOS: Intel (x64), Apple Silicon (ARM64)
+- Linux: x64, ARM64
+
 ## Troubleshooting
 
-- **"Could not locate the squirrel-lsp executable"**
-  - Set the "Server Path" setting to the binary's absolute path, or ensure it's in your `PATH`
-- **Permission denied (Unix/macOS/Linux)**
-  - Run: `chmod +x /path/to/squirrel-lsp`
-- **Extension not activating**
+- "Could not locate the squirrel-lsp executable"
+  - On unsupported platforms, set the "Server Path" to your custom binary, or place `squirrel-lsp` on PATH
+- Permission denied (Unix/macOS/Linux)
+  - If you’re using a custom binary, ensure it’s executable: `chmod +x /path/to/squirrel-lsp`
+- Extension not activating
   - Ensure the file extension is `.nut` and VS Code is version 1.90.0 or newer
 
 ## Building from Source
 
-If you want to build the language server yourself instead of using prebuilt binaries, see the [main repository README](https://github.com/mnshdw/squirrel-lsp#developing) for build instructions.
+If you prefer to build the server yourself, see the [main repository README](https://github.com/mnshdw/squirrel-lsp#developing).
 
 ## License
 
