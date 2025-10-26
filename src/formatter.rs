@@ -88,6 +88,7 @@ enum BraceKind {
     ObjectInline,
     ObjectMultiline,
     Block,
+    Switch,
 }
 
 impl BraceKind {
@@ -105,12 +106,16 @@ struct BraceFrame {
     kind: BraceKind,
     paren_depth_at_open: usize,
     bracket_depth_at_open: usize,
+    // Switch-specific state (only used when kind == BraceKind::Switch)
+    in_case_label: bool,
+    case_body_indented: bool,
 }
 
 #[derive(Clone, Copy)]
 enum ParenKind {
     For,
     If,
+    Switch,
     Function,
     Regular,
 }
@@ -169,6 +174,8 @@ struct Formatter<'a> {
     bracket_indent_bump_stack: Vec<bool>,
     // Tracks the output position where each '[' was written
     array_start_indices: Vec<usize>,
+    // Track the kind of the last closed paren (used to detect switch blocks before '{')
+    last_closed_paren_kind: Option<ParenKind>,
 }
 
 impl<'a> Formatter<'a> {
@@ -188,6 +195,7 @@ impl<'a> Formatter<'a> {
             auto_brace_stack: Vec::new(),
             bracket_indent_bump_stack: Vec::new(),
             array_start_indices: Vec::new(),
+            last_closed_paren_kind: None,
         }
     }
 
@@ -199,6 +207,12 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_token(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
+        // Handle case/default in switch blocks before other processing
+        if self.in_switch_block() && matches!(token.text.as_str(), "case" | "default") {
+            self.write_case_label(token);
+            return;
+        }
+
         match token.text.as_str() {
             "{" => self.write_open_brace(token, next),
             "}" => self.write_close_brace(token, next),
@@ -277,6 +291,12 @@ impl<'a> Formatter<'a> {
             && (self.paren_depth == 0 || bracket_opened_in_paren)
     }
 
+    fn in_switch_block(&self) -> bool {
+        self.braces
+            .last()
+            .is_some_and(|f| f.kind == BraceKind::Switch)
+    }
+
     fn apply_pending_space(&mut self) {
         if self.pending_space && !self.ends_with_whitespace() {
             self.output.push(' ');
@@ -322,12 +342,16 @@ impl<'a> Formatter<'a> {
         self.prepare_token(token);
 
         // Determine brace kind (object literal vs code block, inline vs multiline)
+        // Check if the previous closing paren was for a switch statement
+        let is_switch = matches!(self.last_closed_paren_kind, Some(ParenKind::Switch));
         let is_block = self
             .prev
             .as_ref()
             .is_some_and(|p| p.text == ")" || matches!(p.kind, TokenKind::Keyword));
 
-        let kind = if is_block {
+        let kind = if is_switch {
+            BraceKind::Switch
+        } else if is_block {
             BraceKind::Block
         } else if matches!(next.map(|n| n.text.as_str()), Some("}")) {
             BraceKind::ObjectInline
@@ -341,7 +365,12 @@ impl<'a> Formatter<'a> {
             kind,
             paren_depth_at_open: self.paren_depth,
             bracket_depth_at_open: self.bracket_depth,
+            in_case_label: false,
+            case_body_indented: false,
         });
+
+        // Clear the last closed paren after consuming it
+        self.last_closed_paren_kind = None;
 
         if kind.is_inline() {
             // Keep {} inline (no indent or newline)
@@ -358,6 +387,13 @@ impl<'a> Formatter<'a> {
         let kind = frame.map(|f| f.kind);
         let inline = kind.is_some_and(|k| k.is_inline());
         let is_object = kind.is_some_and(|k| k.is_object());
+
+        // If closing a switch block with an active case body, dedent the case body first
+        if let Some(f) = frame {
+            if f.kind == BraceKind::Switch && f.case_body_indented {
+                self.indent_level = self.indent_level.saturating_sub(1);
+            }
+        }
 
         if !inline {
             self.indent_level = self.indent_level.saturating_sub(1);
@@ -513,6 +549,7 @@ impl<'a> Formatter<'a> {
         let kind = match self.prev.as_ref().map(|p| p.text.as_str()) {
             Some("for") => ParenKind::For,
             Some("if") => ParenKind::If,
+            Some("switch") => ParenKind::Switch,
             Some("function") => ParenKind::Function,
             _ => ParenKind::Regular,
         };
@@ -527,10 +564,11 @@ impl<'a> Formatter<'a> {
 
     fn write_close_paren(&mut self, token: &Token, next: Option<&Token>) {
         self.paren_depth = self.paren_depth.saturating_sub(1);
-        let is_if_header = self
-            .parens
-            .pop()
-            .is_some_and(|f| matches!(f.kind, ParenKind::If));
+        let frame = self.parens.pop();
+        let is_if_header = frame.is_some_and(|f| matches!(f.kind, ParenKind::If));
+
+        // Track the paren kind for the next open brace (e.g., to detect switch blocks)
+        self.last_closed_paren_kind = frame.map(|f| f.kind);
 
         self.ensure_indent();
         self.apply_pending_space();
@@ -665,6 +703,30 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_colon(&mut self, token: &Token, next: Option<&Token>) {
+        // Handle case/default label colons specially
+        let in_case_label = self
+            .braces
+            .last()
+            .is_some_and(|f| f.kind == BraceKind::Switch && f.in_case_label);
+
+        if in_case_label {
+            // For case labels, remove any pending space before the colon
+            if self.output.ends_with(' ') {
+                self.output.pop();
+            }
+            self.ensure_indent();
+            self.output.push(':');
+            self.push_newline();
+            self.indent_level += 1;
+
+            // Mark the case body as indented in the switch frame
+            if let Some(frame) = self.braces.last_mut() {
+                frame.case_body_indented = true;
+                frame.in_case_label = false;
+            }
+            return;
+        }
+
         self.prepare_token(token);
 
         // Detect if this is a ternary colon by checking if we're in expression context
@@ -785,7 +847,27 @@ impl<'a> Formatter<'a> {
         self.set_prev(token);
     }
 
+    fn write_case_label(&mut self, token: &Token) {
+        // If we were in a case body, dedent before the new case label
+        if let Some(frame) = self.braces.last_mut() {
+            if frame.case_body_indented {
+                self.indent_level = self.indent_level.saturating_sub(1);
+                frame.case_body_indented = false;
+            }
+            // Mark that we're now in a case label (before the colon)
+            frame.in_case_label = true;
+        }
+
+        self.prepare_token(token);
+        self.output.push_str(&token.text);
+        self.set_prev(token);
+    }
+
     fn write_blankline(&mut self) {
+        // Don't add blank lines in switch blocks
+        if self.in_switch_block() {
+            return;
+        }
         if self.output.ends_with("\n\n") {
             return;
         }
