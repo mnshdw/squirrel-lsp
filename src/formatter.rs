@@ -389,10 +389,11 @@ impl<'a> Formatter<'a> {
         let is_object = kind.is_some_and(|k| k.is_object());
 
         // If closing a switch block with an active case body, dedent the case body first
-        if let Some(f) = frame {
-            if f.kind == BraceKind::Switch && f.case_body_indented {
-                self.indent_level = self.indent_level.saturating_sub(1);
-            }
+        if let Some(f) = frame
+            && f.kind == BraceKind::Switch
+            && f.case_body_indented
+        {
+            self.indent_level = self.indent_level.saturating_sub(1);
         }
 
         if !inline {

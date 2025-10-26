@@ -3,6 +3,7 @@ set -e
 
 echo "Building LSP server..."
 cargo build --release
+cargo install --path .
 
 echo "Building VSCode extension..."
 npm --prefix ./vscode-extension run compile
