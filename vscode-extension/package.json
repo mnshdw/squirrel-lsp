@@ -78,5 +78,13 @@
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
-  }
+  },
+  "files": [
+    "dist/**",
+    "bin/**",
+    "language-configuration.json",
+    "squirrel.png",
+    "LICENSE*",
+    "README*"
+  ]
 }
