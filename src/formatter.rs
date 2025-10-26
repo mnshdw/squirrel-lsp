@@ -680,11 +680,12 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_member_access(&mut self, token: &Token) {
-        self.ensure_indent();
-        self.apply_pending_space();
+        self.prepare_token(token);
 
-        let prev_text = self.prev.as_ref().map(|p| p.text.as_str());
-        let keep_space = prev_text.is_some_and(|t| is_operator(t) || t == ",");
+        let keep_space = self
+            .prev
+            .as_ref()
+            .is_some_and(|p| p.kind == TokenKind::Keyword || is_operator(&p.text) || p.text == ",");
         if self.output.ends_with(' ') && !keep_space {
             self.output.pop();
         }
@@ -1106,8 +1107,12 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
         return false;
     }
 
-    if matches!(curr_text, ")" | "]" | "," | ";" | "." | "::") {
+    if matches!(curr_text, ")" | "]" | "," | ";") {
         return false;
+    }
+
+    if matches!(curr_text, "." | "::") {
+        return prev.kind == TokenKind::Keyword;
     }
 
     if curr_text == "(" {
