@@ -359,8 +359,8 @@ fn compute_semantic_tokens(text: &str) -> std::result::Result<Vec<SemanticToken>
     let mut visited_children = false;
 
     // Token modifier bit flags
-    const MODIFIER_DECLARATION: u32 = 1 << 0;  // 1
-    const MODIFIER_READONLY: u32 = 1 << 2;     // 4
+    const MODIFIER_DECLARATION: u32 = 1 << 0; // 1
+    const MODIFIER_READONLY: u32 = 1 << 2; // 4
 
     loop {
         let node = cursor.node();
