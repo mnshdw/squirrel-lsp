@@ -21,6 +21,7 @@ rm Cargo.toml.bak
 sed -i.bak "s/\"version\": \"$OLD_VERSION\"/\"version\": \"$NEW_VERSION\"/" vscode-extension/package.json
 rm vscode-extension/package.json.bak
 
+cargo check --quiet
 git commit -am "Bump version to $NEW_VERSION"
 
 TAG_NAME="v$NEW_VERSION"
