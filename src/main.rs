@@ -1,22 +1,29 @@
+mod errors;
 mod formatter;
+mod helpers;
+mod semantic_analyzer;
+mod syntax_analyzer;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
+use semantic_analyzer::compute_semantic_diagnostics;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, InitializeParams, InitializeResult,
-    MessageType, OneOf, Position, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, ServerInfo, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentFormattingParams, InitializeParams, InitializeResult, MessageType, OneOf, Position,
+    Range, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
-use tree_sitter::Parser;
+
+use crate::semantic_analyzer::compute_semantic_tokens;
+use crate::syntax_analyzer::compute_syntax_diagnostics;
 
 struct Backend {
     client: Client,
@@ -242,32 +249,11 @@ fn full_range(text: &str) -> Range {
     Range::new(Position::new(0, 0), Position::new(line, character))
 }
 
-fn position_at(text: &str, byte_offset: usize) -> Position {
-    // Clamp to valid byte boundary
-    let byte_offset = byte_offset.min(text.len());
-    let mut line = 0u32;
-    let mut col_utf16 = 0u32;
-    let mut bytes_seen = 0usize;
-    for ch in text.chars() {
-        let ch_bytes = ch.len_utf8();
-        if bytes_seen >= byte_offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col_utf16 = 0;
-        } else {
-            col_utf16 += ch.len_utf16() as u32;
-        }
-        bytes_seen += ch_bytes;
-    }
-    Position::new(line, col_utf16)
-}
-
 impl Backend {
     async fn publish_syntax_diagnostics(&self, uri: Url, text: &str) {
-        let diags = match compute_syntax_diagnostics(text) {
-            Ok(d) => d,
+        // Collect syntax diagnostics
+        let mut diags = match compute_syntax_diagnostics(text) {
+            Ok(syntax_diags) => syntax_diags,
             Err(e) => {
                 self.client
                     .log_message(MessageType::ERROR, format!("Failed to parse: {e}"))
@@ -275,244 +261,21 @@ impl Backend {
                 Vec::new()
             },
         };
+
+        // Collect semantic diagnostics
+        match compute_semantic_diagnostics(text) {
+            Ok(semantic_diags) => {
+                diags.extend(semantic_diags);
+            },
+            Err(e) => {
+                self.client
+                    .log_message(MessageType::ERROR, format!("Semantic analysis failed: {e}"))
+                    .await;
+            },
+        }
+
         self.client.publish_diagnostics(uri, diags, None).await;
     }
-}
-
-fn compute_syntax_diagnostics(text: &str) -> std::result::Result<Vec<Diagnostic>, String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(tree_sitter_squirrel::language())
-        .map_err(|e| e.to_string())?;
-    let Some(tree) = parser.parse(text, None) else {
-        return Ok(Vec::new());
-    };
-    let root = tree.root_node();
-
-    let mut diags: Vec<Diagnostic> = Vec::new();
-    let mut cursor = root.walk();
-    let mut visited_children = false;
-    loop {
-        let node = cursor.node();
-        if node.is_error() || node.is_missing() || node.kind() == "ERROR" {
-            let start = node.start_byte();
-            let mut end = node.end_byte();
-            if end <= start {
-                end = (start + 1).min(text.len());
-            }
-            let range = Range::new(position_at(text, start), position_at(text, end));
-
-            let msg = if node.is_missing() {
-                format!("Missing {}", node.kind())
-            } else {
-                let snippet = &text[start..end];
-                let first = snippet.lines().next().unwrap_or("").trim();
-                if first.is_empty() {
-                    "Unexpected input".to_string()
-                } else {
-                    let display = if first.len() > 40 {
-                        format!("{}…", &first[..40])
-                    } else {
-                        first.to_string()
-                    };
-                    format!("Unexpected '{}'", display)
-                }
-            };
-
-            diags.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("squirrel-parser".to_string()),
-                message: msg,
-                ..Diagnostic::default()
-            });
-        }
-
-        if !visited_children && cursor.goto_first_child() {
-            visited_children = false;
-            continue;
-        }
-        if cursor.goto_next_sibling() {
-            visited_children = false;
-            continue;
-        }
-        if !cursor.goto_parent() {
-            break;
-        }
-        visited_children = true;
-    }
-    Ok(diags)
-}
-
-fn compute_semantic_tokens(text: &str) -> std::result::Result<Vec<SemanticToken>, String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(tree_sitter_squirrel::language())
-        .map_err(|e| e.to_string())?;
-    let Some(tree) = parser.parse(text, None) else {
-        return Ok(Vec::new());
-    };
-    let root = tree.root_node();
-
-    let mut tokens: Vec<(usize, usize, u32, u32)> = Vec::new();
-    let mut cursor = root.walk();
-    let mut visited_children = false;
-
-    // Token modifier bit flags
-    const MODIFIER_DECLARATION: u32 = 1 << 0; // 1
-    const MODIFIER_READONLY: u32 = 1 << 2; // 4
-
-    loop {
-        let node = cursor.node();
-        let kind = node.kind();
-
-        // Process leaf nodes (including comments which are marked as extra)
-        if node.child_count() == 0 {
-            let (token_type, modifiers) = match kind {
-                // Variables and identifiers
-                "identifier" => {
-                    // Check parent context for better classification
-                    let parent = node.parent();
-                    match parent.map(|p| p.kind()) {
-                        Some("function_declaration") => {
-                            // Function name declaration
-                            (Some(12), MODIFIER_DECLARATION) // FUNCTION with declaration
-                        },
-                        Some("class_declaration") => {
-                            (Some(2), MODIFIER_DECLARATION) // CLASS with declaration
-                        },
-                        Some("enum_declaration") => {
-                            (Some(3), MODIFIER_DECLARATION) // ENUM with declaration
-                        },
-                        Some("const_declaration") => {
-                            // Constants are readonly
-                            (Some(8), MODIFIER_DECLARATION | MODIFIER_READONLY) // VARIABLE with readonly
-                        },
-                        Some("local_declaration") => {
-                            // Local variable declaration
-                            (Some(8), MODIFIER_DECLARATION) // VARIABLE with declaration
-                        },
-                        Some("var_statement") => {
-                            // Var statement declaration
-                            (Some(8), MODIFIER_DECLARATION) // VARIABLE with declaration
-                        },
-                        Some("parameter") => {
-                            // Function parameters - use parameter type
-                            (Some(7), MODIFIER_DECLARATION) // PARAMETER with declaration
-                        },
-                        Some("member_declaration") => {
-                            // Class member/property
-                            (Some(9), MODIFIER_DECLARATION) // PROPERTY with declaration
-                        },
-                        Some("deref_expression") => {
-                            // Check if this deref is the function in a call_expression
-                            if let Some(grandparent) = parent.and_then(|p| p.parent()) {
-                                if grandparent.kind() == "call_expression" {
-                                    // Check if parent deref is the 'function' field
-                                    if let Some(p) = parent {
-                                        if grandparent.child_by_field_name("function") == Some(p) {
-                                            (Some(13), 0) // METHOD
-                                        } else {
-                                            (Some(9), 0) // PROPERTY
-                                        }
-                                    } else {
-                                        (Some(9), 0) // PROPERTY
-                                    }
-                                } else {
-                                    (Some(9), 0) // PROPERTY
-                                }
-                            } else {
-                                (Some(9), 0) // PROPERTY
-                            }
-                        },
-                        Some("call_expression") => {
-                            // Function call
-                            (Some(12), 0) // FUNCTION
-                        },
-                        _ => {
-                            // Regular variable usage
-                            (Some(8), 0) // VARIABLE
-                        },
-                    }
-                },
-
-                // Literals
-                "integer" | "float" => (Some(19), 0), // NUMBER
-                "string" | "string_content" | "verbatim_string" | "char" => (Some(18), 0), // STRING
-                "true" | "false" => (Some(19), 0),    // NUMBER (boolean)
-                "null" => (Some(15), 0),              // KEYWORD
-
-                // Comments
-                "comment" => (Some(17), 0), // COMMENT
-
-                // Operators
-                "=" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "+" | "-" | "*" | "/"
-                | "%" | "++" | "--" | "&&" | "||" | "!" | "&" | "|" | "^" | "~" | "<<" | ">>"
-                | ">>>" | "+=" | "-=" | "*=" | "/=" | "%=" | "<-" => (Some(21), 0), // OPERATOR
-
-                // Keywords
-                "const" | "local" | "var" | "static" | "if" | "else" | "for" | "foreach"
-                | "while" | "do" | "switch" | "case" | "default" | "break" | "continue"
-                | "return" | "yield" | "try" | "catch" | "throw" | "in" | "instanceof"
-                | "typeof" | "delete" | "clone" | "resume" | "extends" | "constructor"
-                | "rawcall" | "function" | "class" | "enum" => (Some(15), 0), // KEYWORD
-
-                _ => (None, 0),
-            };
-
-            if let Some(token_type) = token_type {
-                let start_byte = node.start_byte();
-                let end_byte = node.end_byte();
-                tokens.push((start_byte, end_byte, token_type, modifiers));
-            }
-        }
-
-        if !visited_children && cursor.goto_first_child() {
-            visited_children = false;
-            continue;
-        }
-        if cursor.goto_next_sibling() {
-            visited_children = false;
-            continue;
-        }
-        if !cursor.goto_parent() {
-            break;
-        }
-        visited_children = true;
-    }
-
-    // Sort tokens by position
-    tokens.sort_by_key(|(start, _, _, _)| *start);
-
-    // Convert to LSP semantic tokens (delta-encoded)
-    let mut semantic_tokens = Vec::new();
-    let mut prev_line = 0u32;
-    let mut prev_col = 0u32;
-
-    for (start_byte, end_byte, token_type, modifiers) in tokens {
-        let start_pos = position_at(text, start_byte);
-        let length = end_byte.saturating_sub(start_byte) as u32;
-
-        let delta_line = start_pos.line - prev_line;
-        let delta_start = if delta_line == 0 {
-            start_pos.character - prev_col
-        } else {
-            start_pos.character
-        };
-
-        semantic_tokens.push(SemanticToken {
-            delta_line,
-            delta_start,
-            length,
-            token_type,
-            token_modifiers_bitset: modifiers,
-        });
-
-        prev_line = start_pos.line;
-        prev_col = start_pos.character;
-    }
-
-    Ok(semantic_tokens)
 }
 
 #[tokio::main]

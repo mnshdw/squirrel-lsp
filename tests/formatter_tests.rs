@@ -6,7 +6,9 @@ use squirrel_lsp::formatter::{FormatOptions, IndentStyle, format_document};
 
 #[test]
 fn test_formatter() {
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("formatter");
     let input_dir = base.join("input");
     let expected_dir = base.join("expected");
 

@@ -1,5 +1,7 @@
 use thiserror::Error;
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
+
+use crate::helpers;
 
 #[derive(Debug, Clone)]
 pub struct FormatOptions {
@@ -127,10 +129,7 @@ struct ParenFrame {
 }
 
 pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
-    let mut parser = Parser::new();
-    parser.set_language(tree_sitter_squirrel::language())?;
-
-    let tree = parser.parse(source, None).ok_or(FormatError::ParseError)?;
+    let tree = helpers::parse_squirrel(source).map_err(|_| FormatError::ParseError)?;
     let root = tree.root_node();
     // Be tolerant of parse errors: many modded Squirrel files (e.g., Battle Brothers mods)
     // use a more lenient syntax than the official grammar. Tree-sitter still produces a

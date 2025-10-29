@@ -1,0 +1,2 @@
+// EXPECT: y
+print(y);
