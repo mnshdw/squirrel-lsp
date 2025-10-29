@@ -1017,11 +1017,13 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
                 .utf8_text(bytes)
                 .map_err(|_| FormatError::Utf8)?
                 .to_string();
-            tokens.push(Token {
-                kind: classify_token(&node),
-                text,
-                preceded_by_newline,
-            });
+            if !text.is_empty() {
+                tokens.push(Token {
+                    kind: classify_token(&node),
+                    text,
+                    preceded_by_newline,
+                });
+            }
             prev_end = node.end_byte();
         }
 

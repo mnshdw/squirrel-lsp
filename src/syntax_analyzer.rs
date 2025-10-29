@@ -3,9 +3,7 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use crate::errors::AnalysisError;
 use crate::helpers;
 
-pub fn compute_syntax_diagnostics(
-    text: &str,
-) -> Result<Vec<Diagnostic>, AnalysisError> {
+pub fn compute_syntax_diagnostics(text: &str) -> Result<Vec<Diagnostic>, AnalysisError> {
     let tree = helpers::parse_squirrel(text)?;
     let root = tree.root_node();
 

@@ -340,7 +340,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     .find(|c| c.kind() == "identifier")
                     && first_child.id() == node.id()
                 {
-                    return; // This is the declaration name, skip
+                    return;
                 }
             }
 
@@ -362,13 +362,39 @@ impl<'a> SemanticAnalyzer<'a> {
                 if let Some(prev) = node.prev_sibling()
                     && (prev.kind() == "." || prev.kind() == "::" || prev.kind() == "->")
                 {
-                    return; // This is a property/field access, skip
+                    return;
+                }
+            }
+
+            // Skip identifiers that are property names in table literals
+            // e.g., { id = 3, name = "foo" } - skip "id" and "name"
+            if parent_kind == "assignment_expression" {
+                // Check if this identifier is the left-hand side of the assignment
+                if let Some(left_field) = parent.child_by_field_name("left")
+                    && left_field.id() == node.id()
+                {
+                    // Walk up the tree to check if we're inside a table
+                    let mut ancestor = parent.parent();
+                    while let Some(current) = ancestor {
+                        if current.kind() == "table" {
+                            return;
+                        }
+                        // Stop if we hit a scope boundary
+                        if matches!(
+                            current.kind(),
+                            "function_declaration" | "lambda_expression" | "class_declaration"
+                        ) {
+                            break;
+                        }
+                        ancestor = current.parent();
+                    }
                 }
             }
 
             // Skip identifiers in global variable syntax (::var)
+            // Global variables don't need declaration checking
             if parent_kind == "global_variable" {
-                return; // Global variables don't need declaration checking
+                return;
             }
         }
 
