@@ -21,15 +21,15 @@ const TOKEN_TYPE_STRING: u32 = 18;
 const TOKEN_TYPE_NUMBER: u32 = 19;
 const TOKEN_TYPE_OPERATOR: u32 = 21;
 
-// Squirrel built-in global identifiers
+// Squirrel built-in global identifiers (core language only)
+// Based on sqbaselib.cpp from the official Squirrel 3 implementation
 static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        // Common Squirrel built-ins
+        // Core built-in functions
         "print",
         "error",
         "compilestring",
         "array",
-        "table",
         "type",
         "getroottable",
         "setroottable",
@@ -47,49 +47,6 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "newthread",
         "suspend",
         "regexp",
-        "split",
-        "strip",
-        "lstrip",
-        "rstrip",
-        "tolower",
-        "toupper",
-        "tointeger",
-        "tofloat",
-        "tostring",
-        "tochar",
-        "format",
-        "vargc",
-        "vargv",
-        "rawget",
-        "rawset",
-        "rawin",
-        "rawdelete",
-        "delegate",
-        "getdelegate",
-        "setdelegate",
-        "weakref",
-        "newslot",
-        // Math constants/functions that might be global
-        "PI",
-        "abs",
-        "acos",
-        "asin",
-        "atan",
-        "atan2",
-        "ceil",
-        "cos",
-        "exp",
-        "fabs",
-        "floor",
-        "log",
-        "log10",
-        "pow",
-        "sin",
-        "sqrt",
-        "tan",
-        "rand",
-        "srand",
-        "RAND_MAX",
         // Special keywords that are always in scope
         "this",
     ])
