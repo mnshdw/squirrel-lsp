@@ -49,6 +49,8 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "regexp",
         // Special keywords that are always in scope
         "this",
+        "clone",
+        "Math",
     ])
 });
 
