@@ -212,15 +212,16 @@ impl<'a> Formatter<'a> {
             return;
         }
 
+        let is_symbol = token.kind == TokenKind::Symbol;
         match token.text.as_str() {
-            "{" => self.write_open_brace(token, next),
-            "}" => self.write_close_brace(token, next),
-            ";" => self.write_semicolon(token, next),
-            "," => self.write_comma(token, next),
-            "(" => self.write_open_paren(token, remaining),
-            ")" => self.write_close_paren(token, next),
-            "[" => self.write_open_bracket(token, next, remaining),
-            "]" => self.write_close_bracket(token),
+            "{" if is_symbol => self.write_open_brace(token, next),
+            "}" if is_symbol => self.write_close_brace(token, next),
+            ";" if is_symbol => self.write_semicolon(token, next),
+            "," if is_symbol => self.write_comma(token, next),
+            "(" if is_symbol => self.write_open_paren(token, remaining),
+            ")" if is_symbol => self.write_close_paren(token, next),
+            "[" if is_symbol => self.write_open_bracket(token, next, remaining),
+            "]" if is_symbol => self.write_close_bracket(token),
             "." | "::" => self.write_member_access(token),
             "?" => self.write_question(token),
             ":" => self.write_colon(token, next),
@@ -629,34 +630,19 @@ impl<'a> Formatter<'a> {
     fn write_close_bracket(&mut self, token: &Token) {
         self.bracket_depth = self.bracket_depth.saturating_sub(1);
 
-        // Pop the array start position (we don't use it anymore but need to keep stack in sync)
-        self.array_start_indices.pop();
+        // Pop the array start position to detect whether the array has been multiline
+        let start_idx = self.array_start_indices.pop().unwrap_or(self.output.len());
 
         let was_pretty = self.bracket_indent_bump_stack.pop().unwrap_or(false);
         if was_pretty {
             self.indent_level = self.indent_level.saturating_sub(1);
-            // Add newline before ] for pretty-printed arrays, but only if we're not
-            // already on a newline and if the previous token suggests we should (e.g., after array element, not in middle of expression)
             if !self.output.ends_with('\n') {
-                let parent_is_pretty = self
-                    .bracket_indent_bump_stack
-                    .last()
-                    .copied()
-                    .unwrap_or(false);
-                let prev_is_closing = self
-                    .prev
-                    .as_ref()
-                    .is_some_and(|p| matches!(p.text.as_str(), "]" | "}"));
-                // Also add newline if prev is identifier, number, string (typical array elements)
-                let prev_is_value = self.prev.as_ref().is_some_and(|p| {
-                    matches!(
-                        p.kind,
-                        TokenKind::Identifier | TokenKind::Number | TokenKind::String
-                    )
-                });
-                if parent_is_pretty || prev_is_closing || prev_is_value {
-                    self.push_newline();
-                }
+                self.push_newline();
+            }
+        } else {
+            let had_newline_since_open = self.output[start_idx..].contains('\n');
+            if had_newline_since_open && !self.output.ends_with('\n') {
+                self.push_newline();
             }
         }
         self.ensure_indent();
@@ -853,6 +839,10 @@ impl<'a> Formatter<'a> {
     fn write_blankline(&mut self) {
         // Don't add blank lines in switch blocks
         if self.in_switch_block() {
+            return;
+        }
+        // Skip blank lines inside array literals
+        if !self.array_start_indices.is_empty() {
             return;
         }
         if self.output.ends_with("\n\n") {
