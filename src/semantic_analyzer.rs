@@ -499,7 +499,7 @@ pub fn compute_semantic_tokens(text: &str) -> Result<Vec<SemanticToken>, Analysi
 
                 // Literals
                 "integer" | "float" => (Some(TOKEN_TYPE_NUMBER), 0),
-                "string" | "string_content" | "verbatim_string" | "char" => {
+                "string" | "string_content" | "verbatim_string" | "char" | "\"" => {
                     (Some(TOKEN_TYPE_STRING), 0)
                 },
                 "true" | "false" => (Some(TOKEN_TYPE_NUMBER), 0), // Boolean literals
