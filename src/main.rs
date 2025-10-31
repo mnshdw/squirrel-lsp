@@ -45,7 +45,7 @@ impl Backend {
 
     fn map_formatting_options(options: &tower_lsp::lsp_types::FormattingOptions) -> FormatOptions {
         let tab_width = std::cmp::max(1, options.tab_size as usize);
-        let indent_style = if options.insert_spaces {
+        let indent_style = if options.insert_spaces.unwrap_or(false) {
             IndentStyle::Spaces(tab_width)
         } else {
             IndentStyle::Tabs

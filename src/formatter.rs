@@ -1093,6 +1093,7 @@ fn is_keyword_kind(kind: &str) -> bool {
             | "yield"
             | "in"
             | "extends"
+            | "clone"
     )
 }
 
