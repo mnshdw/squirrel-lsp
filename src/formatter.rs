@@ -415,20 +415,6 @@ impl<'a> Formatter<'a> {
             self.indent_level += 1;
         }
 
-        // Special case: object literal followed by ')' - add blank line
-        if is_object && !inline && matches!(next.map(|t| t.text.as_str()), Some(")")) {
-            self.push_newline();
-            self.write_blankline();
-            self.ensure_indent();
-            self.output.push('}');
-            if needs_array_indent {
-                self.indent_level = self.indent_level.saturating_sub(1);
-            }
-            self.set_prev(token);
-            self.needs_indent = false;
-            return;
-        }
-
         // Default: emit closing brace
         self.ensure_indent();
         self.output.push('}');

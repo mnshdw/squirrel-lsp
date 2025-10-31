@@ -43,5 +43,4 @@ this.perk_legend_muscularity <- this.inherit("scripts/skills/skill", {
 			}
 		];
 	}
-
 });

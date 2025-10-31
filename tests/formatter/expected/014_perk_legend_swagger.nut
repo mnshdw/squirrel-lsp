@@ -48,7 +48,6 @@ this.perk_legend_swagger <- this.inherit("scripts/skills/skill", {
 				type = "text",
 				icon = "ui/icons/warning.png",
 				text = "This character is not wearing armor or their armor is too cheap to gain a bonus"
-
 			});
 		}
 
@@ -79,7 +78,6 @@ this.perk_legend_swagger <- this.inherit("scripts/skills/skill", {
 				type = "text",
 				icon = "ui/icons/warning.png",
 				text = "This character is not wearing armor or their armor is too cheap to gain a bonus"
-
 			});
 		}
 
@@ -125,5 +123,4 @@ this.perk_legend_swagger <- this.inherit("scripts/skills/skill", {
 		local gearvalue = bodyvalue + headvalue;
 		return gearvalue * 0.002 * (1.0 + 0.01 * fat); //
 	}
-
 });
