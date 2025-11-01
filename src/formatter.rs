@@ -592,16 +592,20 @@ impl<'a> Formatter<'a> {
     fn write_close_paren(&mut self, token: &Token, next: Option<&Token>) {
         self.paren_depth = self.paren_depth.saturating_sub(1);
         let frame = self.parens.pop();
-        let is_if_header = frame.is_some_and(|f| matches!(f.kind, ParenKind::If));
+        let frame_kind = frame.as_ref().map(|f| f.kind);
+        let is_if_header = frame_kind.is_some_and(|k| matches!(k, ParenKind::If));
         let was_multiline = frame.is_some_and(|f| f.multiline);
 
         // Track the paren kind for the next open brace (e.g., to detect switch blocks)
-        self.last_closed_paren_kind = frame.map(|f| f.kind);
+        self.last_closed_paren_kind = frame_kind;
 
         if was_multiline {
-            self.indent_level = self.indent_level.saturating_sub(1);
-            if !self.output.ends_with('\n') {
-                self.push_newline();
+            // For multiline function calls, close paren on its own line based on prior indent
+            if matches!(frame_kind, Some(ParenKind::Regular)) {
+                self.indent_level = self.indent_level.saturating_sub(1);
+                if !self.output.ends_with('\n') {
+                    self.push_newline();
+                }
             }
         }
 
@@ -611,8 +615,13 @@ impl<'a> Formatter<'a> {
 
         let next_is_brace = next.is_some_and(|t| t.text == "{");
         if next_is_brace {
-            self.output.push(' ');
-            self.needs_indent = false;
+            // Place opening brace on a new line if the condition was multiline
+            if was_multiline {
+                self.push_newline();
+            } else {
+                self.output.push(' ');
+                self.needs_indent = false;
+            }
         } else if is_if_header {
             // Auto-insert a block for single-statement ifs
             self.output.push(' ');
@@ -846,6 +855,18 @@ impl<'a> Formatter<'a> {
                 // Mark that we're breaking logical operators at this depth
                 if is_logical_op && self.breaking_logical_at_depth.is_none() {
                     self.breaking_logical_at_depth = Some(self.paren_depth);
+                }
+
+                // If we break inside an if/for/switch, remember it became multiline
+                if self.paren_depth > 0
+                    && let Some(frame) = self.parens.last_mut()
+                {
+                    match frame.kind {
+                        ParenKind::If | ParenKind::For | ParenKind::Switch => {
+                            frame.multiline = true;
+                        },
+                        _ => {},
+                    }
                 }
 
                 self.push_newline();

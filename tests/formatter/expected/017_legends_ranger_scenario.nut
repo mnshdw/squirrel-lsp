@@ -83,7 +83,8 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 				} else if (tile.Type != this.Const.World.TerrainType.Forest
 					&& tile.Type != this.Const.World.TerrainType.SnowyForest
 					&& tile.Type != this.Const.World.TerrainType.LeaveForest
-					&& tile.Type != this.Const.World.TerrainType.AutumnForest) {
+					&& tile.Type != this.Const.World.TerrainType.AutumnForest)
+				{
 				} else {
 					local next = true;
 
@@ -166,7 +167,8 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 
 	function onHiredByScenario(bro) {
 		if (bro.getBackground().isBackgroundType(this.Const.BackgroundType.Druid)
-			|| bro.getBackground().isBackgroundType(this.Const.BackgroundType.Ranger)) {
+			|| bro.getBackground().isBackgroundType(this.Const.BackgroundType.Ranger))
+		{
 			bro.improveMood(1.0, "Supports the ranger cause");
 			bro.getSprite("socket").setBrush("bust_base_beasts");
 		} else {
@@ -176,7 +178,8 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 
 	function onGenerateBro(bro) {
 		if (bro.getBackground().isBackgroundType(this.Const.BackgroundType.Druid)
-			|| bro.getBackground().isBackgroundType(this.Const.BackgroundType.Ranger)) {
+			|| bro.getBackground().isBackgroundType(this.Const.BackgroundType.Ranger))
+		{
 			bro.m.HiringCost = this.Math.floor(bro.m.HiringCost * 0.75); //1.0 = default
 			bro.getBaseProperties().DailyWageMult *= 0.75; //1.0 = default
 			bro.getSkills().update();
