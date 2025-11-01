@@ -106,13 +106,15 @@ impl BraceKind {
 }
 
 #[derive(Clone, Copy)]
-struct BraceFrame {
+struct BraceContext {
     kind: BraceKind,
     paren_depth_at_open: usize,
     bracket_depth_at_open: usize,
     // Switch-specific state (only used when kind == BraceKind::Switch)
     in_case_label: bool,
     case_body_indented: bool,
+    // True if this brace was auto-inserted for single-statement if/else
+    is_synthetic: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,10 +127,17 @@ enum ParenKind {
 }
 
 #[derive(Clone, Copy)]
-struct ParenFrame {
+struct ParenContext {
     kind: ParenKind,
     bracket_depth_at_open: usize,
     multiline: bool,
+}
+
+#[derive(Clone, Copy)]
+struct BracketContext {
+    pretty_print: bool,
+    /// Output position where the '[' was written
+    start_output_pos: usize,
 }
 
 pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
@@ -168,14 +177,9 @@ struct Formatter<'a> {
     pending_space: bool,
     prev_was_unary: bool,
     prev: Option<PrevToken>,
-    braces: Vec<BraceFrame>,
-    parens: Vec<ParenFrame>,
-    // Track auto-inserted blocks (for single-statement ifs) to close on ';'
-    auto_brace_stack: Vec<bool>,
-    // Tracks whether we increased indentation after an array '[' for pretty-printing
-    bracket_indent_bump_stack: Vec<bool>,
-    // Tracks the output position where each '[' was written
-    array_start_indices: Vec<usize>,
+    braces: Vec<BraceContext>,
+    parens: Vec<ParenContext>,
+    brackets: Vec<BracketContext>,
     // Track the kind of the last closed paren (used to detect switch blocks before '{')
     last_closed_paren_kind: Option<ParenKind>,
     // Track the paren_depth at which we started breaking logical operators
@@ -198,9 +202,7 @@ impl<'a> Formatter<'a> {
             prev: None,
             braces: Vec::new(),
             parens: Vec::new(),
-            auto_brace_stack: Vec::new(),
-            bracket_indent_bump_stack: Vec::new(),
-            array_start_indices: Vec::new(),
+            brackets: Vec::new(),
             last_closed_paren_kind: None,
             breaking_logical_at_depth: None,
             ternary_indent_active: false,
@@ -304,9 +306,9 @@ impl<'a> Formatter<'a> {
             .unwrap_or(0);
         let bracket_opened_in_paren =
             self.paren_depth > 0 && self.bracket_depth > paren_bracket_depth;
-        self.bracket_indent_bump_stack
+        self.brackets
             .last()
-            .copied()
+            .map(|b| b.pretty_print)
             .unwrap_or(false)
             && (self.paren_depth == 0 || bracket_opened_in_paren)
     }
@@ -382,12 +384,13 @@ impl<'a> Formatter<'a> {
 
         self.output.push('{');
 
-        self.braces.push(BraceFrame {
+        self.braces.push(BraceContext {
             kind,
             paren_depth_at_open: self.paren_depth,
             bracket_depth_at_open: self.bracket_depth,
             in_case_label: false,
             case_body_indented: false,
+            is_synthetic: false,
         });
 
         // Clear the last closed paren after consuming it
@@ -427,9 +430,9 @@ impl<'a> Formatter<'a> {
         // Extra indent for objects in non-pretty-printed arrays (aligns } with ])
         let next_is_bracket = matches!(next.map(|t| t.text.as_str()), Some("]"));
         let in_pretty_array = self
-            .bracket_indent_bump_stack
+            .brackets
             .last()
-            .copied()
+            .map(|b| b.pretty_print)
             .unwrap_or(false);
         let needs_array_indent = !inline && next_is_bracket && !in_pretty_array && is_object;
 
@@ -513,8 +516,7 @@ impl<'a> Formatter<'a> {
         }
 
         // If we auto-opened a block for a single-statement if/else, close it now
-        if self.auto_brace_stack.last().copied().unwrap_or(false) {
-            self.auto_brace_stack.pop();
+        if self.braces.last().is_some_and(|b| b.is_synthetic) {
             let synthetic = Token {
                 text: "}".to_string(),
                 kind: TokenKind::Symbol,
@@ -587,7 +589,7 @@ impl<'a> Formatter<'a> {
             ParenKind::Function => false,
         };
 
-        self.parens.push(ParenFrame {
+        self.parens.push(ParenContext {
             kind,
             bracket_depth_at_open: self.bracket_depth,
             multiline: should_multiline,
@@ -637,13 +639,19 @@ impl<'a> Formatter<'a> {
         } else if is_if_header {
             // Auto-insert a block for single-statement ifs
             self.output.push(' ');
-            let synthetic = Token {
-                text: "{".to_string(),
-                kind: TokenKind::Symbol,
-                preceded_by_newline: false,
-            };
-            self.write_open_brace(&synthetic, next);
-            self.auto_brace_stack.push(true);
+            self.output.push('{');
+            self.indent_level += 1;
+            self.push_newline();
+
+            // Push synthetic brace context
+            self.braces.push(BraceContext {
+                kind: BraceKind::Block,
+                paren_depth_at_open: self.paren_depth,
+                bracket_depth_at_open: self.bracket_depth,
+                in_case_label: false,
+                case_body_indented: false,
+                is_synthetic: true,
+            });
         }
         self.set_prev(token);
     }
@@ -665,9 +673,11 @@ impl<'a> Formatter<'a> {
         let is_empty = matches!(next.map(|n| n.text.as_str()), Some("]"));
 
         if is_subscript || is_empty {
-            self.bracket_indent_bump_stack.push(false);
+            self.brackets.push(BracketContext {
+                pretty_print: false,
+                start_output_pos: self.output.len(),
+            });
             self.set_prev(token);
-            self.array_start_indices.push(self.output.len());
             return;
         }
 
@@ -697,24 +707,25 @@ impl<'a> Formatter<'a> {
         // - User explicitly formatted it multiline
         let should_pretty_print = next_is_complex || would_be_too_long || user_pref;
 
+        self.brackets.push(BracketContext {
+            pretty_print: should_pretty_print,
+            start_output_pos: self.output.len(),
+        });
+
         if should_pretty_print {
             self.push_newline();
             self.indent_level += 1;
-            self.bracket_indent_bump_stack.push(true);
-        } else {
-            self.bracket_indent_bump_stack.push(false);
         }
         self.set_prev(token);
-        self.array_start_indices.push(self.output.len());
     }
 
     fn write_close_bracket(&mut self, token: &Token) {
         self.bracket_depth = self.bracket_depth.saturating_sub(1);
 
-        // Pop the array start position to detect whether the array has been multiline
-        let start_idx = self.array_start_indices.pop().unwrap_or(self.output.len());
+        let ctx = self.brackets.pop();
+        let was_pretty = ctx.map(|c| c.pretty_print).unwrap_or(false);
+        let start_idx = ctx.map(|c| c.start_output_pos).unwrap_or(self.output.len());
 
-        let was_pretty = self.bracket_indent_bump_stack.pop().unwrap_or(false);
         if was_pretty {
             self.indent_level = self.indent_level.saturating_sub(1);
             if !self.output.ends_with('\n') {
@@ -1081,13 +1092,18 @@ impl<'a> Formatter<'a> {
         if !next_is_brace && !next_is_if {
             // Auto-insert block for single-statement else
             self.output.push(' ');
-            let synthetic = Token {
-                text: "{".to_string(),
-                kind: TokenKind::Symbol,
-                preceded_by_newline: false,
-            };
-            self.write_open_brace(&synthetic, next);
-            self.auto_brace_stack.push(true);
+            self.output.push('{');
+            self.indent_level += 1;
+            self.push_newline();
+
+            self.braces.push(BraceContext {
+                kind: BraceKind::Block,
+                paren_depth_at_open: self.paren_depth,
+                bracket_depth_at_open: self.bracket_depth,
+                in_case_label: false,
+                case_body_indented: false,
+                is_synthetic: true,
+            });
         } else {
             self.output.push(' ');
             self.needs_indent = false;
@@ -1118,7 +1134,7 @@ impl<'a> Formatter<'a> {
             return;
         }
         // Skip blank lines inside array literals
-        if !self.array_start_indices.is_empty() {
+        if !self.brackets.is_empty() {
             return;
         }
         if self.output.ends_with("\n\n") {
