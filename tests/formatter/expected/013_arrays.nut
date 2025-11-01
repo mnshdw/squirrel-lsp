@@ -1,7 +1,9 @@
 ::Const.Perks.TransformationTree <- {
 	ID = "TransformationMagicTree",
 	Name = "Transformation",
-	Descriptions = ["transformation"],
+	Descriptions = [
+		"transformation"
+	],
 	Tree = [
 		[
 			::Const.Perks.PerkDefs.RotuTransformationRatNimble,

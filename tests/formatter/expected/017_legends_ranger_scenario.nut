@@ -35,7 +35,9 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 
 		local bros = roster.getAll(); //starting party
 		local talents;
-		bros[0].setStartValuesEx(["legend_ranger_commander_background"]);
+		bros[0].setStartValuesEx([
+			"legend_ranger_commander_background"
+		]);
 		bros[0].getBackground().m.RawDescription = "{%name% grew up in the rangers and was taught the ways of the forest by veteran foresters. Running through the woods for a lifetime has made %name% particularly good at tracking enemies, or tumbling into the homes of wild druids trying to escape from the modern world}";
 		::Legends.Traits.grant(bros[0], ::Legends.Trait.Player);
 		this.addScenarioPerk(bros[0].getBackground(), this.Const.Perks.PerkDefs.Pathfinder);
@@ -46,7 +48,9 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		bros[0].setPlaceInFormation(3);
 		bros[0].setVeteranPerks(2);
 
-		bros[1].setStartValuesEx(["legend_druid_commander_background"]);
+		bros[1].setStartValuesEx([
+			"legend_druid_commander_background"
+		]);
 		bros[1].getBackground().m.RawDescription = "{%name% was the bastard of a noblewoman who left them in a ditch at the edge of the forest to be taken by wolves. It worked, but instead left %name% being cared for by a wolfmother with no cubs of her own. When the she-wolf was slain by vengeful poachers %name% took it upon themselves to be as far away from society as possible. Right up until a certain ranger fell headfirst into their hovel}";
 
 		::Legends.Traits.grant(bros[1], ::Legends.Trait.Player);

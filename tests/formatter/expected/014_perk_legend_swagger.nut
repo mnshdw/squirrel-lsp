@@ -118,7 +118,10 @@ this.perk_legend_swagger <- this.inherit("scripts/skills/skill", {
 			headvalue = headvalue + head.getValue();
 		}
 
-		local fat = actor.getItems().getStaminaModifier([::Const.ItemSlot.Body, ::Const.ItemSlot.Head,]);
+		local fat = actor.getItems().getStaminaModifier([
+			::Const.ItemSlot.Body,
+			::Const.ItemSlot.Head,
+		]);
 
 		local gearvalue = bodyvalue + headvalue;
 		return gearvalue * 0.002 * (1.0 + 0.01 * fat); //

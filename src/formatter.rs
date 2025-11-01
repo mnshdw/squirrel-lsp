@@ -670,19 +670,31 @@ impl<'a> Formatter<'a> {
             return;
         }
 
-        // Enable pretty-printing for arrays of objects/arrays, or inherit from pretty-printed parent
+        // Enable pretty-printing for arrays of objects/arrays
         let next_is_complex = matches!(next.map(|n| n.text.as_str()), Some("{") | Some("["));
-        let parent_is_pretty = self
-            .bracket_indent_bump_stack
-            .last()
-            .copied()
-            .unwrap_or(false);
 
         // Estimate if array content would exceed max_width chars on one line
         let estimated_length = self.estimate_array_length(remaining);
-        let would_be_too_long = estimated_length > self.options.max_width;
 
-        let should_pretty_print = next_is_complex || parent_is_pretty || would_be_too_long;
+        // For arrays inside function calls, only check the array length itself.
+        // For top-level arrays (assignments, etc.), check the full line length.
+        let would_be_too_long = if self.paren_depth > 0 {
+            estimated_length > self.options.max_width
+        } else {
+            let current_line_length = self.get_current_line_length();
+            current_line_length + estimated_length > self.options.max_width
+        };
+
+        // If the input had a newline after '[', keep it for consistency
+        let user_pref = remaining
+            .first()
+            .is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), "]"));
+
+        // Pretty-print if:
+        // - Contains complex elements (objects/arrays)
+        // - Would exceed max_width
+        // - User explicitly formatted it multiline
+        let should_pretty_print = next_is_complex || would_be_too_long || user_pref;
 
         if should_pretty_print {
             self.push_newline();
