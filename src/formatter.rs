@@ -8,6 +8,7 @@ pub struct FormatOptions {
     pub indent_style: IndentStyle,
     pub insert_final_newline: bool,
     pub trim_trailing_whitespace: bool,
+    pub max_width: usize,
 }
 
 impl Default for FormatOptions {
@@ -16,6 +17,7 @@ impl Default for FormatOptions {
             indent_style: IndentStyle::Tabs,
             insert_final_newline: true,
             trim_trailing_whitespace: true,
+            max_width: 100,
         }
     }
 }
@@ -126,6 +128,7 @@ enum ParenKind {
 struct ParenFrame {
     kind: ParenKind,
     bracket_depth_at_open: usize,
+    multiline: bool,
 }
 
 pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
@@ -175,6 +178,8 @@ struct Formatter<'a> {
     array_start_indices: Vec<usize>,
     // Track the kind of the last closed paren (used to detect switch blocks before '{')
     last_closed_paren_kind: Option<ParenKind>,
+    // Track the paren_depth at which we started breaking logical operators
+    breaking_logical_at_depth: Option<usize>,
 }
 
 impl<'a> Formatter<'a> {
@@ -195,6 +200,7 @@ impl<'a> Formatter<'a> {
             bracket_indent_bump_stack: Vec::new(),
             array_start_indices: Vec::new(),
             last_closed_paren_kind: None,
+            breaking_logical_at_depth: None,
         }
     }
 
@@ -256,10 +262,6 @@ impl<'a> Formatter<'a> {
                 .is_some_and(|f| matches!(f.kind, ParenKind::For))
     }
 
-    fn in_if_condition(&self) -> bool {
-        self.paren_depth > 0 && self.parens.iter().any(|f| matches!(f.kind, ParenKind::If))
-    }
-
     fn in_function_params(&self) -> bool {
         self.paren_depth > 0
             && self
@@ -268,9 +270,23 @@ impl<'a> Formatter<'a> {
                 .is_some_and(|f| matches!(f.kind, ParenKind::Function))
     }
 
+    fn in_multiline_call(&self) -> bool {
+        self.paren_depth > 0 && self.parens.last().is_some_and(|f| f.multiline)
+    }
+
     fn in_object_top_level(&self) -> bool {
         self.braces.last().is_some_and(|f| {
             f.kind == BraceKind::ObjectMultiline
+                && f.paren_depth_at_open == self.paren_depth
+                && f.bracket_depth_at_open == self.bracket_depth
+        })
+    }
+
+    // True when we're positioned at the top level of an object literal (either inline or multiline)
+    // with matching paren/bracket depth where properties are written (i.e., not inside nested () or []).
+    fn in_object_property_position(&self) -> bool {
+        self.braces.last().is_some_and(|f| {
+            f.kind.is_object()
                 && f.paren_depth_at_open == self.paren_depth
                 && f.bracket_depth_at_open == self.bracket_depth
         })
@@ -347,13 +363,14 @@ impl<'a> Formatter<'a> {
         let is_block = self
             .prev
             .as_ref()
-            .is_some_and(|p| p.text == ")" || matches!(p.kind, TokenKind::Keyword));
+            .is_some_and(|p| p.text == ")" || is_block_introducing_keyword(p.text.as_str()));
 
         let kind = if is_switch {
             BraceKind::Switch
         } else if is_block {
             BraceKind::Block
         } else if matches!(next.map(|n| n.text.as_str()), Some("}")) {
+            // Empty objects {} are always inline
             BraceKind::ObjectInline
         } else {
             BraceKind::ObjectMultiline
@@ -458,6 +475,9 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
         self.output.push(';');
 
+        // Reset logical operator breaking state (statement ended)
+        self.breaking_logical_at_depth = None;
+
         // If a line comment follows on the same line (not preceded by newline), keep it on the same line
         let next_is_same_line_comment = next
             .filter(|t| {
@@ -500,6 +520,7 @@ impl<'a> Formatter<'a> {
         let in_object_top_level = self.in_object_top_level();
         let in_function_params = self.in_function_params();
         let in_pretty_array = self.in_pretty_array();
+        let in_multiline_call = self.in_multiline_call();
 
         // Skip trailing commas in objects (but allow them in arrays)
         let is_trailing = matches!(next.map(|t| t.text.as_str()), Some("}"));
@@ -516,6 +537,8 @@ impl<'a> Formatter<'a> {
                 Some(t) if t.text.as_str() == "function" => self.write_blankline(),
                 _ => self.push_newline(),
             }
+        } else if in_multiline_call {
+            self.push_newline();
         } else if in_pretty_array {
             // In a pretty-printed array, commas should create newlines
             self.push_newline();
@@ -528,7 +551,7 @@ impl<'a> Formatter<'a> {
         self.set_prev(token);
     }
 
-    fn write_open_paren(&mut self, token: &Token, _remaining: &[Token]) {
+    fn write_open_paren(&mut self, token: &Token, remaining: &[Token]) {
         self.prepare_token(token);
         self.output.push('(');
         self.paren_depth += 1;
@@ -541,10 +564,41 @@ impl<'a> Formatter<'a> {
             _ => ParenKind::Regular,
         };
 
+        // For if/switch conditions, estimate if the content would fit on one line
+        let should_break_condition = if matches!(kind, ParenKind::If | ParenKind::Switch) {
+            let current_line_len = self.get_current_line_length();
+            let estimated_condition_len = self.estimate_paren_content_length(remaining);
+            current_line_len + estimated_condition_len + 3 > self.options.max_width // +3 for ") {"
+        } else {
+            false
+        };
+
+        // Store this decision in the ParenFrame so we can use it when we see logical operators
+        if should_break_condition && self.breaking_logical_at_depth.is_none() {
+            self.breaking_logical_at_depth = Some(self.paren_depth);
+        }
+
+        // Determine if function call should be multiline:
+        // 1. If originally formatted as multiline, try to preserve it
+        // 2. Exclude cases where first arg is array/object (they handle their own formatting)
+        let should_multiline = if matches!(kind, ParenKind::Regular) {
+            remaining.first().is_some_and(|t| {
+                t.preceded_by_newline && !matches!(t.text.as_str(), ")" | "[" | "{")
+            })
+        } else {
+            false
+        };
+
         self.parens.push(ParenFrame {
             kind,
             bracket_depth_at_open: self.bracket_depth,
+            multiline: should_multiline,
         });
+
+        if should_multiline {
+            self.indent_level += 1;
+            self.push_newline();
+        }
 
         self.set_prev(token);
     }
@@ -553,9 +607,17 @@ impl<'a> Formatter<'a> {
         self.paren_depth = self.paren_depth.saturating_sub(1);
         let frame = self.parens.pop();
         let is_if_header = frame.is_some_and(|f| matches!(f.kind, ParenKind::If));
+        let was_multiline = frame.is_some_and(|f| f.multiline);
 
         // Track the paren kind for the next open brace (e.g., to detect switch blocks)
         self.last_closed_paren_kind = frame.map(|f| f.kind);
+
+        if was_multiline {
+            self.indent_level = self.indent_level.saturating_sub(1);
+            if !self.output.ends_with('\n') {
+                self.push_newline();
+            }
+        }
 
         self.ensure_indent();
         self.apply_pending_space();
@@ -610,9 +672,9 @@ impl<'a> Formatter<'a> {
             .copied()
             .unwrap_or(false);
 
-        // Estimate if array content would exceed 100 chars on one line
+        // Estimate if array content would exceed max_width chars on one line
         let estimated_length = self.estimate_array_length(remaining);
-        let would_be_too_long = estimated_length > 100;
+        let would_be_too_long = estimated_length > self.options.max_width;
 
         let should_pretty_print = next_is_complex || parent_is_pretty || would_be_too_long;
 
@@ -700,27 +762,43 @@ impl<'a> Formatter<'a> {
             return;
         }
 
+        // Decide between ternary colon and object property colon
+        let prev_is_question = self.prev.as_ref().is_some_and(|p| p.text.as_str() == "?");
+        let in_object_property = self.in_object_property_position();
+
         self.prepare_token(token);
 
-        // Detect if this is a ternary colon by checking if we're in expression context
-        // (parens or brackets) vs object literal context
-        let is_ternary = self.paren_depth > 0 || self.bracket_depth > 0;
+        if prev_is_question {
+            // Ternary: ensure space before and after
+            if !self.output.ends_with(' ') {
+                self.output.push(' ');
+            }
+            self.output.push(':');
+            self.output.push(' ');
+            self.set_prev(token);
+            return;
+        }
 
-        // For ternary operators, ensure space before colon
-        if is_ternary && !self.output.ends_with(' ') {
+        if in_object_property {
+            // Object property: no space before colon, optional space after
+            if self.output.ends_with(' ') {
+                self.output.pop();
+            }
+            self.output.push(':');
+            let should_space = !matches!(next.map(|t| t.text.as_str()), Some("}" | "," | ";"));
+            if should_space {
+                self.output.push(' ');
+            }
+            self.set_prev(token);
+            return;
+        }
+
+        // Default behavior: treat as ternary-style spacing
+        if !self.output.ends_with(' ') {
             self.output.push(' ');
         }
-        // For object literals, remove space before colon
-        else if !is_ternary && self.output.ends_with(' ') {
-            self.output.pop();
-        }
-
         self.output.push(':');
-
-        let should_space = !matches!(next.map(|t| t.text.as_str()), Some("}" | "," | ";"));
-        if should_space {
-            self.output.push(' ');
-        }
+        self.output.push(' ');
         self.set_prev(token);
     }
 
@@ -741,22 +819,67 @@ impl<'a> Formatter<'a> {
             return;
         }
 
-        // Check if we should break line for logical operators in if conditions
+        // Break before the operator when the current line is already too long
         let is_logical_op = matches!(token.text.as_str(), "&&" | "||");
+        let is_binary_op = matches!(
+            token.text.as_str(),
+            "+" | "-" | "*" | "/" | "==" | "!=" | "<" | "<=" | ">" | ">="
+        );
 
-        if is_logical_op && self.in_if_condition() {
-            // Check if keeping the rest of the condition on one line would exceed 100 chars
+        // Check if we're in an if/while/switch condition (where we pre-computed the breaking decision)
+        let in_condition = self.paren_depth > 0
+            && self
+                .parens
+                .last()
+                .is_some_and(|f| matches!(f.kind, ParenKind::If | ParenKind::Switch));
+
+        // Logical operators can break anywhere when lines are too long
+        // Other binary operators only break at top level (paren_depth == 0)
+        let can_break = is_logical_op || self.paren_depth == 0;
+
+        if (is_logical_op || is_binary_op) && can_break {
             let current_line_length = self.get_current_line_length();
-            let rest_of_condition_length = self.estimate_length_to_paren_close(remaining);
 
-            // Break if the total would exceed 100 chars
-            if current_line_length + token.text.len() + 2 + rest_of_condition_length > 100 {
-                // Break before the operator (Rust style)
+            // For logical operators in conditions, we've already decided at the opening paren
+            // whether to break ALL of them or none. Just check if we're in breaking mode.
+            // For logical operators at top level, estimate if the rest of the line would be too long
+            // For other binary operators, break if line is too long
+            let should_break = if is_logical_op && in_condition {
+                self.breaking_logical_at_depth == Some(self.paren_depth)
+            } else if is_logical_op {
+                if self.breaking_logical_at_depth == Some(self.paren_depth) {
+                    true
+                } else {
+                    let estimated_remaining = self.estimate_statement_length(remaining);
+                    current_line_length + estimated_remaining > self.options.max_width
+                }
+            } else {
+                current_line_length + 1 + token.text.len() > self.options.max_width
+            };
+
+            if should_break {
+                // Mark that we're breaking logical operators at this depth
+                if is_logical_op && self.breaking_logical_at_depth.is_none() {
+                    self.breaking_logical_at_depth = Some(self.paren_depth);
+                }
+
                 self.push_newline();
-                // Add extra indentation for continuation line
-                self.indent_level += 1;
+
+                // Calculate extra indentation:
+                // - Base: +1 for continuation line
+                // - If we're inside parens deeper than where we started: +1 for each extra level
+                let breaking_depth = self.breaking_logical_at_depth.unwrap_or(0);
+                let extra_paren_indent =
+                    if is_logical_op && self.paren_depth > breaking_depth && !in_condition {
+                        self.paren_depth - breaking_depth
+                    } else {
+                        0
+                    };
+                let extra_indent = 1 + extra_paren_indent;
+
+                self.indent_level += extra_indent;
                 self.ensure_indent();
-                self.indent_level = self.indent_level.saturating_sub(1);
+                self.indent_level = self.indent_level.saturating_sub(extra_indent);
                 self.output.push_str(&token.text);
                 self.pending_space = true;
                 self.set_prev(token);
@@ -917,28 +1040,49 @@ impl<'a> Formatter<'a> {
         line.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
     }
 
-    fn estimate_length_to_paren_close(&self, remaining: &[Token]) -> usize {
+    fn estimate_paren_content_length(&self, remaining: &[Token]) -> usize {
         let mut length = 0;
-        let mut paren_depth = 0;
-        let mut prev_text = "";
+        let mut depth = 0;
+        let mut prev_text = "(";
 
         for token in remaining {
-            // Skip blanklines and comments
+            // Track paren depth to find the matching closing paren
+            match token.text.as_str() {
+                "(" => depth += 1,
+                ")" => {
+                    if depth == 0 {
+                        // Found the closing paren for this condition
+                        break;
+                    }
+                    depth -= 1;
+                },
+                _ => {},
+            }
+
+            // Skip blanklines and comments for estimation
             if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
                 continue;
             }
 
-            // Track paren depth
-            match token.text.as_str() {
-                "(" => paren_depth += 1,
-                ")" => {
-                    if paren_depth > 0 {
-                        paren_depth -= 1;
-                    } else {
-                        break; // Hit closing paren at depth 0
-                    }
-                },
-                _ => {},
+            length += token.text.len();
+            length += self.estimate_token_spacing(prev_text, token);
+            prev_text = &token.text;
+        }
+
+        length
+    }
+
+    fn estimate_statement_length(&self, remaining: &[Token]) -> usize {
+        let mut length = 0;
+        let mut prev_text = "";
+
+        for token in remaining {
+            if matches!(token.text.as_str(), ";" | "{" | "}") {
+                break;
+            }
+
+            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
+                continue;
             }
 
             length += token.text.len();
@@ -1070,6 +1214,25 @@ fn is_keyword_kind(kind: &str) -> bool {
             | "in"
             | "extends"
             | "clone"
+    )
+}
+
+// Only these keywords introduce code blocks directly before a '{'
+fn is_block_introducing_keyword(text: &str) -> bool {
+    matches!(
+        text,
+        "if" | "else"
+            | "for"
+            | "foreach"
+            | "while"
+            | "switch"
+            | "try"
+            | "catch"
+            | "finally"
+            | "do"
+            | "class"
+            | "enum"
+            | "function"
     )
 }
 

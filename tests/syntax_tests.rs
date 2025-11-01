@@ -51,14 +51,15 @@ fn test_syntax_errors() {
                     "Mismatch for {}: expected exactly {} errors, got {}",
                     file_name, n, error_count
                 );
-            }
+            },
             ExpectedErrors::AtLeastOne => {
                 assert!(
                     error_count >= 1,
                     "Mismatch for {}: expected at least 1 error, got {}",
-                    file_name, error_count
+                    file_name,
+                    error_count
                 );
-            }
+            },
         }
     }
 }

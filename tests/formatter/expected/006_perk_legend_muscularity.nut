@@ -19,7 +19,10 @@ this.perk_legend_muscularity <- this.inherit("scripts/skills/skill", {
 			return;
 		}
 
-		local isValidRanged = item != null && item.isItemType(this.Const.Items.ItemType.Weapon) && (item.isWeaponType(this.Const.Items.WeaponType.Throwing) || item.isWeaponType(this.Const.Items.WeaponType.Bow));
+		local isValidRanged = item != null
+			&& item.isItemType(this.Const.Items.ItemType.Weapon)
+			&& (item.isWeaponType(this.Const.Items.WeaponType.Throwing)
+				|| item.isWeaponType(this.Const.Items.WeaponType.Bow));
 		if (!_skill.isRanged()
 			|| (isValidRanged && item.isItemType(this.Const.Items.ItemType.Weapon))) {
 			_properties.DamageTotalMult *= 1.0 + this.getBonus();
