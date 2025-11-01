@@ -115,7 +115,7 @@ struct BraceFrame {
     case_body_indented: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum ParenKind {
     For,
     If,
@@ -564,20 +564,6 @@ impl<'a> Formatter<'a> {
             _ => ParenKind::Regular,
         };
 
-        // For if/switch conditions, estimate if the content would fit on one line
-        let should_break_condition = if matches!(kind, ParenKind::If | ParenKind::Switch) {
-            let current_line_len = self.get_current_line_length();
-            let estimated_condition_len = self.estimate_paren_content_length(remaining);
-            current_line_len + estimated_condition_len + 3 > self.options.max_width // +3 for ") {"
-        } else {
-            false
-        };
-
-        // Store this decision in the ParenFrame so we can use it when we see logical operators
-        if should_break_condition && self.breaking_logical_at_depth.is_none() {
-            self.breaking_logical_at_depth = Some(self.paren_depth);
-        }
-
         // Determine if function call should be multiline:
         // 1. If originally formatted as multiline, try to preserve it
         // 2. Exclude cases where first arg is array/object (they handle their own formatting)
@@ -838,23 +824,22 @@ impl<'a> Formatter<'a> {
         let can_break = is_logical_op || self.paren_depth == 0;
 
         if (is_logical_op || is_binary_op) && can_break {
-            let current_line_length = self.get_current_line_length();
+            let line_length = self.get_current_line_length();
 
-            // For logical operators in conditions, we've already decided at the opening paren
-            // whether to break ALL of them or none. Just check if we're in breaking mode.
-            // For logical operators at top level, estimate if the rest of the line would be too long
-            // For other binary operators, break if line is too long
-            let should_break = if is_logical_op && in_condition {
-                self.breaking_logical_at_depth == Some(self.paren_depth)
-            } else if is_logical_op {
-                if self.breaking_logical_at_depth == Some(self.paren_depth) {
-                    true
+            // Decide whether to break before this operator.
+            let should_break = if is_logical_op {
+                let estimated_remaining = if in_condition {
+                    self.estimate_paren_content_length(remaining)
                 } else {
-                    let estimated_remaining = self.estimate_statement_length(remaining);
-                    current_line_length + estimated_remaining > self.options.max_width
-                }
+                    self.estimate_statement_length(remaining)
+                };
+                // " <op> " contributes 1 + op.len() + 1 characters
+                let op_len = 1 + token.text.len() + 1;
+                // For conditions, also include ") {"
+                let cond_len = if in_condition { 3 } else { 0 };
+                line_length + op_len + estimated_remaining + cond_len > self.options.max_width
             } else {
-                current_line_length + 1 + token.text.len() > self.options.max_width
+                line_length + 1 + token.text.len() > self.options.max_width
             };
 
             if should_break {
@@ -981,17 +966,32 @@ impl<'a> Formatter<'a> {
     }
 
     fn estimate_token_spacing(&self, prev_text: &str, token: &Token) -> usize {
-        if token.text == "," {
-            1 // space after comma
-        } else if is_operator(&token.text) {
-            2 // spaces around operators
-        } else if !matches!(prev_text, "[" | "(" | "{" | "." | "::")
-            && !matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::")
-        {
-            1 // potential space between tokens
-        } else {
-            0
+        // No space before closers or punctuation that doesn't take a leading space
+        if matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::") {
+            return 0;
         }
+
+        // No space right after openers or member access
+        if matches!(prev_text, "[" | "(" | "{" | "." | "::") {
+            return 0;
+        }
+
+        // Space before operator tokens
+        if is_operator(&token.text) {
+            return 1;
+        }
+
+        // Space after comma
+        if prev_text == "," {
+            return 1;
+        }
+
+        // Space after operator
+        if is_operator(prev_text) {
+            return 1;
+        }
+
+        0
     }
 
     fn estimate_array_length(&self, remaining: &[Token]) -> usize {
