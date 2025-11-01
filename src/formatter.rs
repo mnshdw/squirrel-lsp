@@ -235,6 +235,7 @@ impl<'a> Formatter<'a> {
             "?" => self.write_ternary(token, remaining),
             ":" => self.write_colon(token, next),
             "++" | "--" => self.write_increment(token),
+            "else" if token.kind == TokenKind::Keyword => self.write_else(token, next),
             _ if token.kind == TokenKind::Comment => self.write_comment(token),
             _ if token.kind == TokenKind::Blankline => self.write_blankline(),
             _ if is_operator(token.text.as_str()) => self.write_operator(token, remaining),
@@ -511,7 +512,7 @@ impl<'a> Formatter<'a> {
             self.push_newline();
         }
 
-        // If we auto-opened a block for a single-statement if, close it now
+        // If we auto-opened a block for a single-statement if/else, close it now
         if self.auto_brace_stack.last().copied().unwrap_or(false) {
             self.auto_brace_stack.pop();
             let synthetic = Token {
@@ -519,7 +520,7 @@ impl<'a> Formatter<'a> {
                 kind: TokenKind::Symbol,
                 preceded_by_newline: false,
             };
-            self.write_close_brace(&synthetic, None);
+            self.write_close_brace(&synthetic, next);
         }
     }
 
@@ -1066,6 +1067,32 @@ impl<'a> Formatter<'a> {
     fn write_default(&mut self, token: &Token) {
         self.prepare_token(token);
         self.output.push_str(&token.text);
+        self.set_prev(token);
+    }
+
+    fn write_else(&mut self, token: &Token, next: Option<&Token>) {
+        self.prepare_token(token);
+        self.output.push_str(&token.text);
+
+        // Check if next token is a brace or another 'if'
+        let next_is_brace = next.is_some_and(|t| t.text == "{");
+        let next_is_if = next.is_some_and(|t| t.text == "if");
+
+        if !next_is_brace && !next_is_if {
+            // Auto-insert block for single-statement else
+            self.output.push(' ');
+            let synthetic = Token {
+                text: "{".to_string(),
+                kind: TokenKind::Symbol,
+                preceded_by_newline: false,
+            };
+            self.write_open_brace(&synthetic, next);
+            self.auto_brace_stack.push(true);
+        } else {
+            self.output.push(' ');
+            self.needs_indent = false;
+        }
+
         self.set_prev(token);
     }
 
