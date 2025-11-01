@@ -180,6 +180,8 @@ struct Formatter<'a> {
     last_closed_paren_kind: Option<ParenKind>,
     // Track the paren_depth at which we started breaking logical operators
     breaking_logical_at_depth: Option<usize>,
+    // Track if we've indented for a multiline ternary
+    ternary_indent_active: bool,
 }
 
 impl<'a> Formatter<'a> {
@@ -201,6 +203,7 @@ impl<'a> Formatter<'a> {
             array_start_indices: Vec::new(),
             last_closed_paren_kind: None,
             breaking_logical_at_depth: None,
+            ternary_indent_active: false,
         }
     }
 
@@ -229,7 +232,7 @@ impl<'a> Formatter<'a> {
             "[" if is_symbol => self.write_open_bracket(token, next, remaining),
             "]" if is_symbol => self.write_close_bracket(token),
             "." | "::" => self.write_member_access(token),
-            "?" => self.write_question(token),
+            "?" => self.write_ternary(token, remaining),
             ":" => self.write_colon(token, next),
             "++" | "--" => self.write_increment(token),
             _ if token.kind == TokenKind::Comment => self.write_comment(token),
@@ -478,6 +481,12 @@ impl<'a> Formatter<'a> {
         // Reset logical operator breaking state (statement ended)
         self.breaking_logical_at_depth = None;
 
+        // If we're in a multiline ternary, dedent back
+        if self.ternary_indent_active {
+            self.indent_level = self.indent_level.saturating_sub(1);
+            self.ternary_indent_active = false;
+        }
+
         // If a line comment follows on the same line (not preceded by newline), keep it on the same line
         let next_is_same_line_comment = next
             .filter(|t| {
@@ -713,10 +722,9 @@ impl<'a> Formatter<'a> {
     fn write_member_access(&mut self, token: &Token) {
         self.prepare_token(token);
 
-        let keep_space = self
-            .prev
-            .as_ref()
-            .is_some_and(|p| p.kind == TokenKind::Keyword || is_operator(&p.text) || p.text == ",");
+        let keep_space = self.prev.as_ref().is_some_and(|p| {
+            p.kind == TokenKind::Keyword || is_operator(&p.text) || p.text == "," || p.text == ":"
+        });
         if self.output.ends_with(' ') && !keep_space {
             self.output.pop();
         }
@@ -724,7 +732,26 @@ impl<'a> Formatter<'a> {
         self.set_prev(token);
     }
 
-    fn write_question(&mut self, token: &Token) {
+    fn write_ternary(&mut self, token: &Token, remaining: &[Token]) {
+        let line_length = self.get_current_line_length();
+        let estimated_length = self.estimate_ternary_length(remaining);
+
+        // " ? " contributes 3 characters
+        let would_exceed = line_length + 3 + estimated_length > self.options.max_width;
+
+        if would_exceed {
+            // Break to new line and indent
+            self.push_newline();
+            self.indent_level += 1;
+            self.ternary_indent_active = true;
+            self.ensure_indent();
+            self.output.push('?');
+            self.output.push(' ');
+            self.set_prev(token);
+            return;
+        }
+
+        // Default inline formatting
         self.prepare_token(token);
         if !self.output.ends_with(' ') {
             self.output.push(' ');
@@ -763,10 +790,28 @@ impl<'a> Formatter<'a> {
         let prev_is_question = self.prev.as_ref().is_some_and(|p| p.text.as_str() == "?");
         let in_object_property = self.in_object_property_position();
 
+        if self.ternary_indent_active && !in_object_property {
+            if !self.output.ends_with(' ') && !self.output.ends_with('\n') {
+                self.output.push(' ');
+            }
+            if !self.output.ends_with('\n') {
+                self.output.push('\n');
+            }
+            self.needs_indent = true;
+            self.pending_space = false;
+            self.prev = None;
+
+            self.ensure_indent();
+            self.output.push(':');
+            self.output.push(' ');
+            self.set_prev(token);
+            return;
+        }
+
         self.prepare_token(token);
 
         if prev_is_question {
-            // Ternary: ensure space before and after
+            // Inline ternary: ensure space before and after
             if !self.output.ends_with(' ') {
                 self.output.push(' ');
             }
@@ -821,11 +866,12 @@ impl<'a> Formatter<'a> {
         // Other binary operators only break at top level (paren_depth == 0)
         let can_break = is_logical_op || self.paren_depth == 0;
 
-        if (is_logical_op || is_binary_op) && can_break {
-            if self.should_break_before_operator(token, remaining, is_logical_op) {
-                self.write_operator_with_line_break(token, is_logical_op);
-                return;
-            }
+        if (is_logical_op || is_binary_op)
+            && can_break
+            && self.should_break_before_operator(token, remaining, is_logical_op)
+        {
+            self.write_operator_with_line_break(token, is_logical_op);
+            return;
         }
 
         self.write_operator_default(token);
@@ -849,9 +895,9 @@ impl<'a> Formatter<'a> {
     }
 
     fn is_at_condition_top_level(&self) -> bool {
-        self.parens.last().is_some_and(|f| {
-            matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch)
-        })
+        self.parens
+            .last()
+            .is_some_and(|f| matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch))
     }
 
     fn should_break_before_operator(
@@ -914,7 +960,9 @@ impl<'a> Formatter<'a> {
         }
 
         // If we break inside an if/for/switch, remember it became multiline
-        if self.paren_depth > 0 && let Some(frame) = self.parens.last_mut() {
+        if self.paren_depth > 0
+            && let Some(frame) = self.parens.last_mut()
+        {
             match frame.kind {
                 ParenKind::If | ParenKind::For | ParenKind::Switch => {
                     frame.multiline = true;
@@ -1160,6 +1208,41 @@ impl<'a> Formatter<'a> {
         for token in remaining {
             if matches!(token.text.as_str(), ";" | "{" | "}") {
                 break;
+            }
+
+            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
+                continue;
+            }
+
+            length += token.text.len();
+            length += self.estimate_token_spacing(prev_text, token);
+            prev_text = &token.text;
+        }
+
+        length
+    }
+
+    fn estimate_ternary_length(&self, remaining: &[Token]) -> usize {
+        let mut length = 0;
+        let mut prev_text = "?";
+        let mut depth = 0;
+
+        for token in remaining {
+            match token.text.as_str() {
+                "?" => depth += 1,
+                ":" => {
+                    if depth == 0 {
+                        length += 2; // ": "
+                        prev_text = ":";
+                        continue;
+                    }
+                    depth -= 1;
+                },
+                ";" => {
+                    // Reached end of ternary expression
+                    break;
+                },
+                _ => {},
             }
 
             if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
