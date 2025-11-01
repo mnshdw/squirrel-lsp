@@ -564,15 +564,17 @@ impl<'a> Formatter<'a> {
             _ => ParenKind::Regular,
         };
 
-        // Determine if function call should be multiline:
-        // 1. If originally formatted as multiline, try to preserve it
-        // 2. Exclude cases where first arg is array/object (they handle their own formatting)
-        let should_multiline = if matches!(kind, ParenKind::Regular) {
-            remaining.first().is_some_and(|t| {
-                t.preceded_by_newline && !matches!(t.text.as_str(), ")" | "[" | "{")
-            })
-        } else {
-            false
+        // Determine if we should start multiline after this paren based on original layout.
+        // We preserve an existing newline immediately after '(' for both function calls
+        // and control-flow conditions (if/for/switch), excluding trivial closers.
+        // For function calls, also exclude cases where first arg is array/object (they manage their own formatting).
+        let next_breaks_line = remaining
+            .first()
+            .is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), ")" | "[" | "{"));
+        let should_multiline = match kind {
+            ParenKind::Regular => next_breaks_line,
+            ParenKind::If | ParenKind::For | ParenKind::Switch => next_breaks_line,
+            ParenKind::Function => false,
         };
 
         self.parens.push(ParenFrame {
@@ -805,94 +807,152 @@ impl<'a> Formatter<'a> {
 
     fn write_operator(&mut self, token: &Token, remaining: &[Token]) {
         if is_unary_operator(token.text.as_str()) && is_unary_context(self.prev.as_ref()) {
-            self.prepare_token(token);
-            self.output.push_str(&token.text);
-            // Mark that the previous token was a unary operator so the next token doesn't
-            // get a space inserted after it.
-            self.prev_was_unary = true;
-            self.set_prev(token);
+            self.write_unary_operator(token);
             return;
         }
 
-        // Break before the operator when the current line is already too long
         let is_logical_op = matches!(token.text.as_str(), "&&" | "||");
         let is_binary_op = matches!(
             token.text.as_str(),
             "+" | "-" | "*" | "/" | "==" | "!=" | "<" | "<=" | ">" | ">="
         );
 
-        // Check if we're in an if/while/switch condition (where we pre-computed the breaking decision)
-        let in_condition = self.paren_depth > 0
-            && self
-                .parens
-                .last()
-                .is_some_and(|f| matches!(f.kind, ParenKind::If | ParenKind::Switch));
-
         // Logical operators can break anywhere when lines are too long
         // Other binary operators only break at top level (paren_depth == 0)
         let can_break = is_logical_op || self.paren_depth == 0;
 
         if (is_logical_op || is_binary_op) && can_break {
-            let line_length = self.get_current_line_length();
-
-            // Decide whether to break before this operator.
-            let should_break = if is_logical_op {
-                let estimated_remaining = if in_condition {
-                    self.estimate_paren_content_length(remaining)
-                } else {
-                    self.estimate_statement_length(remaining)
-                };
-                // " <op> " contributes 1 + op.len() + 1 characters
-                let op_len = 1 + token.text.len() + 1;
-                // For conditions, also include ") {"
-                let cond_len = if in_condition { 3 } else { 0 };
-                line_length + op_len + estimated_remaining + cond_len > self.options.max_width
-            } else {
-                line_length + 1 + token.text.len() > self.options.max_width
-            };
-
-            if should_break {
-                // Mark that we're breaking logical operators at this depth
-                if is_logical_op && self.breaking_logical_at_depth.is_none() {
-                    self.breaking_logical_at_depth = Some(self.paren_depth);
-                }
-
-                // If we break inside an if/for/switch, remember it became multiline
-                if self.paren_depth > 0
-                    && let Some(frame) = self.parens.last_mut()
-                {
-                    match frame.kind {
-                        ParenKind::If | ParenKind::For | ParenKind::Switch => {
-                            frame.multiline = true;
-                        },
-                        _ => {},
-                    }
-                }
-
-                self.push_newline();
-
-                // Calculate extra indentation:
-                // - Base: +1 for continuation line
-                // - If we're inside parens deeper than where we started: +1 for each extra level
-                let breaking_depth = self.breaking_logical_at_depth.unwrap_or(0);
-                let extra_paren_indent =
-                    if is_logical_op && self.paren_depth > breaking_depth && !in_condition {
-                        self.paren_depth - breaking_depth
-                    } else {
-                        0
-                    };
-                let extra_indent = 1 + extra_paren_indent;
-
-                self.indent_level += extra_indent;
-                self.ensure_indent();
-                self.indent_level = self.indent_level.saturating_sub(extra_indent);
-                self.output.push_str(&token.text);
-                self.pending_space = true;
-                self.set_prev(token);
+            if self.should_break_before_operator(token, remaining, is_logical_op) {
+                self.write_operator_with_line_break(token, is_logical_op);
                 return;
             }
         }
 
+        self.write_operator_default(token);
+    }
+
+    fn write_unary_operator(&mut self, token: &Token) {
+        self.prepare_token(token);
+        self.output.push_str(&token.text);
+        // Mark that the previous token was a unary operator so the next token doesn't
+        // get a space inserted after it.
+        self.prev_was_unary = true;
+        self.set_prev(token);
+    }
+
+    fn is_in_condition(&self) -> bool {
+        self.paren_depth > 0
+            && self
+                .parens
+                .last()
+                .is_some_and(|f| matches!(f.kind, ParenKind::If | ParenKind::Switch))
+    }
+
+    fn is_at_condition_top_level(&self) -> bool {
+        self.parens.last().is_some_and(|f| {
+            matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch)
+        })
+    }
+
+    fn should_break_before_operator(
+        &self,
+        token: &Token,
+        remaining: &[Token],
+        is_logical_op: bool,
+    ) -> bool {
+        let line_length = self.get_current_line_length();
+        let in_condition = self.is_in_condition();
+        let at_condition_top_level = self.is_at_condition_top_level();
+
+        // If the condition is already multiline (either because we broke earlier by width
+        // or because the input had a newline after '('), force breaking before each top-level
+        // logical operator to keep one operand per line.
+        let should_break = if is_logical_op
+            && in_condition
+            && at_condition_top_level
+            && self.parens.last().is_some_and(|f| f.multiline)
+        {
+            true
+        } else if is_logical_op {
+            let estimated_remaining = if in_condition {
+                self.estimate_paren_content_length(remaining)
+            } else {
+                self.estimate_statement_length(remaining)
+            };
+            // " <op> " contributes 1 + op.len() + 1 characters
+            let op_len = 1 + token.text.len() + 1;
+            // For conditions, also include ") {"
+            let cond_len = if in_condition { 3 } else { 0 };
+            line_length + op_len + estimated_remaining + cond_len > self.options.max_width
+        } else {
+            line_length + 1 + token.text.len() > self.options.max_width
+        };
+
+        if !should_break {
+            return false;
+        }
+
+        // Prefer breaking at the top-level of a condition, not inside nested
+        // parenthesized sub-expressions like `(a || b)`.
+        let inside_any_condition = self
+            .parens
+            .iter()
+            .any(|f| matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch));
+
+        // Don't break inside nested conditions (e.g., inside `(a || b)` within an if)
+        if is_logical_op && inside_any_condition && !at_condition_top_level {
+            return false;
+        }
+
+        true
+    }
+
+    fn write_operator_with_line_break(&mut self, token: &Token, is_logical_op: bool) {
+        // Mark that we're breaking logical operators at this depth
+        if is_logical_op && self.breaking_logical_at_depth.is_none() {
+            self.breaking_logical_at_depth = Some(self.paren_depth);
+        }
+
+        // If we break inside an if/for/switch, remember it became multiline
+        if self.paren_depth > 0 && let Some(frame) = self.parens.last_mut() {
+            match frame.kind {
+                ParenKind::If | ParenKind::For | ParenKind::Switch => {
+                    frame.multiline = true;
+                },
+                _ => {},
+            }
+        }
+
+        self.push_newline();
+
+        let extra_indent = self.calculate_operator_indent(is_logical_op);
+        self.indent_level += extra_indent;
+        self.ensure_indent();
+        self.indent_level = self.indent_level.saturating_sub(extra_indent);
+
+        self.output.push_str(&token.text);
+        self.pending_space = true;
+        self.set_prev(token);
+    }
+
+    fn calculate_operator_indent(&self, is_logical_op: bool) -> usize {
+        let in_condition = self.is_in_condition();
+
+        // Calculate extra indentation:
+        // - Base: +1 for continuation line
+        // - If we're inside parens deeper than where we started: +1 for each extra level
+        let breaking_depth = self.breaking_logical_at_depth.unwrap_or(0);
+        let extra_paren_indent =
+            if is_logical_op && self.paren_depth > breaking_depth && !in_condition {
+                self.paren_depth - breaking_depth
+            } else {
+                0
+            };
+
+        1 + extra_paren_indent
+    }
+
+    fn write_operator_default(&mut self, token: &Token) {
         self.prepare_token(token);
         if !self.output.ends_with(' ') {
             self.output.push(' ');
