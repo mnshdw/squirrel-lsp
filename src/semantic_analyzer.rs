@@ -213,7 +213,7 @@ impl<'a> SemanticAnalyzer<'a> {
 
         self.diagnostics.push(Diagnostic {
             range,
-            severity: Some(DiagnosticSeverity::WARNING),
+            severity: Some(DiagnosticSeverity::HINT),
             source: Some("squirrel-semantic".to_string()),
             message: format!("Unused variable: `{}`", name),
             tags: Some(vec![DiagnosticTag::UNNECESSARY]),
