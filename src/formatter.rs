@@ -1513,6 +1513,10 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
         return true;
     }
 
+    if prev_text == ")" && current.kind == TokenKind::Keyword {
+        return true;
+    }
+
     false
 }
 
