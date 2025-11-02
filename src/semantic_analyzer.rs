@@ -203,6 +203,24 @@ impl<'a> SemanticAnalyzer<'a> {
         });
     }
 
+    /// Add a diagnostic for unused variables
+    fn report_unused(&mut self, name: &str, pos: Position) {
+        let end_pos = Position {
+            line: pos.line,
+            character: pos.character + name.len() as u32,
+        };
+        let range = Range::new(pos, end_pos);
+
+        self.diagnostics.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::WARNING),
+            source: Some("squirrel-semantic".to_string()),
+            message: format!("Unused variable: `{}`", name),
+            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+            ..Diagnostic::default()
+        });
+    }
+
     /// Main analysis entry point
     pub fn analyze(mut self, root: Node) -> Vec<Diagnostic> {
         self.analyze_node(root);
@@ -409,6 +427,8 @@ impl<'a> SemanticAnalyzer<'a> {
             let end = self.position_at(node.end_byte());
             let range = Range::new(start, end);
             self.report_undeclared(&name, range);
+        } else {
+            self.scopes.record_reference(&name);
         }
     }
 

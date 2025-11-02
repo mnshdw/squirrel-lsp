@@ -32,3 +32,37 @@ pub(crate) fn position_at(text: &str, byte_offset: usize) -> Position {
     }
     Position::new(line, col_utf16)
 }
+
+/// Convert LSP Position to byte offset
+pub(crate) fn byte_offset_at(text: &str, position: Position) -> Option<usize> {
+    let mut current_line = 0u32;
+    let mut current_col_utf16 = 0u32;
+    let mut byte_offset = 0usize;
+
+    for ch in text.chars() {
+        if current_line == position.line && current_col_utf16 == position.character {
+            return Some(byte_offset);
+        }
+
+        if current_line > position.line {
+            // Position is beyond the end of the file
+            return None;
+        }
+
+        if ch == '\n' {
+            current_line += 1;
+            current_col_utf16 = 0;
+        } else {
+            current_col_utf16 += ch.len_utf16() as u32;
+        }
+
+        byte_offset += ch.len_utf8();
+    }
+
+    // Check if we're at the end of the file
+    if current_line == position.line && current_col_utf16 == position.character {
+        Some(byte_offset)
+    } else {
+        None
+    }
+}

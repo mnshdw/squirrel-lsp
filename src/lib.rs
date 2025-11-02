@@ -1,3 +1,4 @@
+pub mod code_actions;
 pub mod errors;
 pub mod formatter;
 pub mod helpers;

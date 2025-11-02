@@ -1,3 +1,4 @@
+mod code_actions;
 mod errors;
 mod formatter;
 mod helpers;
@@ -7,15 +8,18 @@ mod syntax_analyzer;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use code_actions::generate_code_actions;
 use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
 use semantic_analyzer::compute_semantic_diagnostics;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, InitializeParams, InitializeResult, MessageType, OneOf, Position,
-    Range, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionResponse, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    InitializeParams, InitializeResult, MessageType, OneOf, Position, Range, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
     TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextDocumentSyncOptions, TextEdit, Url,
@@ -152,6 +156,11 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
             ),
+            code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+                code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                resolve_provider: Some(false),
+                work_done_progress_options: Default::default(),
+            })),
             ..ServerCapabilities::default()
         };
 
@@ -231,6 +240,27 @@ impl LanguageServer for Backend {
                     .await;
                 Ok(None)
             },
+        }
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let text = match self.get_document(&uri).await {
+            Some(text) => text,
+            None => return Ok(None),
+        };
+
+        let actions = generate_code_actions(&text, &params.context.diagnostics, &uri);
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(
+                actions
+                    .into_iter()
+                    .map(CodeActionOrCommand::CodeAction)
+                    .collect(),
+            ))
         }
     }
 }
