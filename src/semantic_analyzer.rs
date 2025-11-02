@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, SemanticToken};
+use tower_lsp::lsp_types::{
+    Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range, SemanticToken,
+};
 use tree_sitter::Node;
 
 use crate::errors::AnalysisError;
@@ -49,6 +51,7 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "suspend",
         "throw",
         "type",
+        "typeof",
         // Special keywords that are always in scope
         "this",
         "Math",
@@ -59,22 +62,37 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 #[derive(Debug, Clone)]
 struct Scope {
     /// Variables declared in this scope: name -> declaration position
-    variables: HashMap<String, Position>,
+    declarations: HashMap<String, Position>,
+    /// Variables referenced in this scope
+    references: HashSet<String>,
 }
 
 impl Scope {
     fn new() -> Self {
         Self {
-            variables: HashMap::new(),
+            declarations: HashMap::new(),
+            references: HashSet::new(),
         }
     }
 
     fn declare(&mut self, name: String, pos: Position) {
-        self.variables.insert(name, pos);
+        self.declarations.insert(name, pos);
+    }
+
+    fn reference(&mut self, name: String) {
+        self.references.insert(name);
     }
 
     fn contains(&self, name: &str) -> bool {
-        self.variables.contains_key(name)
+        self.declarations.contains_key(name)
+    }
+
+    /// Get unused variables (declared but not referenced)
+    fn get_unused(&self) -> Vec<(&String, &Position)> {
+        self.declarations
+            .iter()
+            .filter(|(name, _)| !self.references.contains(*name))
+            .collect()
     }
 }
 
@@ -99,8 +117,8 @@ impl ScopeStack {
         self.scopes.push(Scope::new());
     }
 
-    fn pop(&mut self) {
-        self.scopes.pop(); // Can't accidentally pop global
+    fn pop(&mut self) -> Option<Scope> {
+        self.scopes.pop() // Can't accidentally pop global
     }
 
     fn current_mut(&mut self) -> &mut Scope {
@@ -113,6 +131,21 @@ impl ScopeStack {
             .rev()
             .chain(std::iter::once(&self.global))
             .any(|scope| scope.contains(name))
+    }
+
+    /// Record a variable reference in the scope where it's declared
+    fn record_reference(&mut self, name: &str) {
+        // Search from innermost to outermost scope
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.contains(name) {
+                scope.reference(name.to_string());
+                return;
+            }
+        }
+        // Check global scope
+        if self.global.contains(name) {
+            self.global.reference(name.to_string());
+        }
     }
 }
 
@@ -139,9 +172,14 @@ impl<'a> SemanticAnalyzer<'a> {
         self.scopes.push();
     }
 
-    /// Pop the current scope from the stack
+    /// Pop the current scope from the stack and check for unused variables
     fn pop_scope(&mut self) {
-        self.scopes.pop();
+        if let Some(scope) = self.scopes.pop() {
+            // Check for unused variables in the popped scope
+            for (name, pos) in scope.get_unused() {
+                self.report_unused(name, *pos);
+            }
+        }
     }
 
     /// Declare a variable in the current scope
