@@ -747,7 +747,11 @@ impl<'a> Formatter<'a> {
         self.prepare_token(token);
 
         let keep_space = self.prev.as_ref().is_some_and(|p| {
-            p.kind == TokenKind::Keyword || is_operator(&p.text) || p.text == "," || p.text == ":"
+            p.kind == TokenKind::Keyword
+                || is_operator(&p.text)
+                || p.text == ","
+                || p.text == ":"
+                || p.text == "?"
         });
         if self.output.ends_with(' ') && !keep_space {
             self.output.pop();
