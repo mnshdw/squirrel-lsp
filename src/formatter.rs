@@ -140,6 +140,12 @@ struct BracketContext {
     start_output_pos: usize,
 }
 
+#[derive(Clone, Copy)]
+struct TernaryContext {
+    /// Total depth (paren + bracket) when the ternary started
+    depth_at_start: usize,
+}
+
 pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
     let tree = helpers::parse_squirrel(source).map_err(|_| FormatError::ParseError)?;
     let root = tree.root_node();
@@ -180,12 +186,12 @@ struct Formatter<'a> {
     braces: Vec<BraceContext>,
     parens: Vec<ParenContext>,
     brackets: Vec<BracketContext>,
+    ternaries: Vec<TernaryContext>,
     // Track the kind of the last closed paren (used to detect switch blocks before '{')
     last_closed_paren_kind: Option<ParenKind>,
     // Track the paren_depth at which we started breaking logical operators
     breaking_logical_at_depth: Option<usize>,
-    // Track if we've indented for a multiline ternary
-    ternary_indent_active: bool,
+    // Stack of multiline ternary contexts (for nested ternaries)
 }
 
 impl<'a> Formatter<'a> {
@@ -203,9 +209,9 @@ impl<'a> Formatter<'a> {
             braces: Vec::new(),
             parens: Vec::new(),
             brackets: Vec::new(),
+            ternaries: Vec::new(),
             last_closed_paren_kind: None,
             breaking_logical_at_depth: None,
-            ternary_indent_active: false,
         }
     }
 
@@ -214,6 +220,10 @@ impl<'a> Formatter<'a> {
             trim_trailing_whitespace(&mut self.output);
         }
         self.output
+    }
+
+    fn total_depth(&self) -> usize {
+        self.paren_depth + self.bracket_depth
     }
 
     fn write_token(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
@@ -486,9 +496,9 @@ impl<'a> Formatter<'a> {
         self.breaking_logical_at_depth = None;
 
         // If we're in a multiline ternary, dedent back
-        if self.ternary_indent_active {
+        if !self.ternaries.is_empty() {
             self.indent_level = self.indent_level.saturating_sub(1);
-            self.ternary_indent_active = false;
+            self.ternaries.pop();
         }
 
         // If a line comment follows on the same line (not preceded by newline), keep it on the same line
@@ -605,6 +615,17 @@ impl<'a> Formatter<'a> {
 
     fn write_close_paren(&mut self, token: &Token, next: Option<&Token>) {
         self.paren_depth = self.paren_depth.saturating_sub(1);
+
+        // If we're closing a paren and a ternary indent is active, reset it
+        while let Some(ctx) = self.ternaries.last() {
+            if self.total_depth() < ctx.depth_at_start {
+                self.indent_level = self.indent_level.saturating_sub(1);
+                self.ternaries.pop();
+            } else {
+                break;
+            }
+        }
+
         let frame = self.parens.pop();
         let frame_kind = frame.as_ref().map(|f| f.kind);
         let is_if_header = frame_kind.is_some_and(|k| matches!(k, ParenKind::If));
@@ -771,7 +792,9 @@ impl<'a> Formatter<'a> {
             // Break to new line and indent
             self.push_newline();
             self.indent_level += 1;
-            self.ternary_indent_active = true;
+            self.ternaries.push(TernaryContext {
+                depth_at_start: self.total_depth(),
+            });
             self.ensure_indent();
             self.output.push('?');
             self.output.push(' ');
@@ -818,16 +841,10 @@ impl<'a> Formatter<'a> {
         let prev_is_question = self.prev.as_ref().is_some_and(|p| p.text.as_str() == "?");
         let in_object_property = self.in_object_property_position();
 
-        if self.ternary_indent_active && !in_object_property {
-            if !self.output.ends_with(' ') && !self.output.ends_with('\n') {
-                self.output.push(' ');
-            }
+        if !self.ternaries.is_empty() && !in_object_property {
             if !self.output.ends_with('\n') {
-                self.output.push('\n');
+                self.push_newline();
             }
-            self.needs_indent = true;
-            self.pending_space = false;
-            self.prev = None;
 
             self.ensure_indent();
             self.output.push(':');
@@ -1284,22 +1301,40 @@ impl<'a> Formatter<'a> {
     fn estimate_ternary_length(&self, remaining: &[Token]) -> usize {
         let mut length = 0;
         let mut prev_text = "?";
-        let mut depth = 0;
+        let mut ternary_depth = 0;
+        let mut nesting_depth = 0;
+        let mut seen_colon = false;
 
         for token in remaining {
             match token.text.as_str() {
-                "?" => depth += 1,
+                "?" => ternary_depth += 1,
                 ":" => {
-                    if depth == 0 {
+                    if ternary_depth == 0 {
+                        if seen_colon {
+                            break;
+                        }
+                        seen_colon = true;
                         length += 2; // ": "
                         prev_text = ":";
                         continue;
                     }
-                    depth -= 1;
+                    ternary_depth -= 1;
                 },
-                ";" => {
-                    // Reached end of ternary expression
-                    break;
+                "(" | "[" | "{" => nesting_depth += 1,
+                ")" | "]" | "}" => {
+                    if nesting_depth == 0 {
+                        if seen_colon && ternary_depth == 0 {
+                            break;
+                        }
+                    } else {
+                        nesting_depth -= 1;
+                    }
+                },
+                ";" => break,
+                "," => {
+                    if nesting_depth == 0 && ternary_depth == 0 && seen_colon {
+                        break;
+                    }
                 },
                 _ => {},
             }
