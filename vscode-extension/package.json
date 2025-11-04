@@ -2,7 +2,7 @@
   "name": "squirrel-lsp-vscode",
   "displayName": "Squirrel Language Server Client",
   "description": "Language Server Protocol support for Squirrel (.nut files) with code formatting capabilities.",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "publisher": "mnshdw",
   "license": "MIT",
   "icon": "squirrel.png",
