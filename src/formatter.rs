@@ -1472,6 +1472,7 @@ fn is_keyword_kind(kind: &str) -> bool {
             | "in"
             | "extends"
             | "clone"
+            | "typeof"
     )
 }
 
