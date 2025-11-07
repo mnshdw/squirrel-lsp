@@ -250,7 +250,9 @@ impl<'a> Formatter<'a> {
             "else" if token.kind == TokenKind::Keyword => self.write_else(token, next),
             _ if token.kind == TokenKind::Comment => self.write_comment(token),
             _ if token.kind == TokenKind::Blankline => self.write_blankline(),
-            _ if is_operator(token.text.as_str()) => self.write_operator(token, remaining),
+            _ if token.kind != TokenKind::String && is_operator(token.text.as_str()) => {
+                self.write_operator(token, remaining)
+            },
             _ => self.write_default(token),
         }
     }
@@ -1396,8 +1398,17 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
                 .map_err(|_| FormatError::Utf8)?
                 .to_string();
             if !text.is_empty() {
+                let kind = if node
+                    .parent()
+                    .filter(|p| is_string_node_kind(p.kind()))
+                    .is_some()
+                {
+                    TokenKind::String
+                } else {
+                    classify_token(&node)
+                };
                 tokens.push(Token {
-                    kind: classify_token(&node),
+                    kind,
                     text,
                     preceded_by_newline,
                 });
@@ -1443,6 +1454,10 @@ fn classify_token(node: &Node) -> TokenKind {
         _ if node.is_named() => TokenKind::Other,
         _ => TokenKind::Symbol,
     }
+}
+
+fn is_string_node_kind(kind: &str) -> bool {
+    matches!(kind, "string" | "string_literal" | "raw_string")
 }
 
 fn is_keyword_kind(kind: &str) -> bool {
@@ -1503,6 +1518,11 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
 
     let prev_text = prev.text.as_str();
     let curr_text = current.text.as_str();
+
+    // Never insert spaces inside or around parts of string literals
+    if matches!(prev.kind, TokenKind::String) || matches!(current.kind, TokenKind::String) {
+        return false;
+    }
 
     if matches!(prev_text, "(" | "[" | "{" | "." | "::") {
         return false;
