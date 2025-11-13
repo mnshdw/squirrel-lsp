@@ -613,25 +613,58 @@ pub fn compute_semantic_tokens(text: &str) -> Result<Vec<SemanticToken>, Analysi
 
     for (start_byte, end_byte, token_type, modifiers) in tokens {
         let start_pos = helpers::position_at(text, start_byte);
-        let length = end_byte.saturating_sub(start_byte) as u32;
+        let end_pos = helpers::position_at(text, end_byte);
 
-        let delta_line = start_pos.line - prev_line;
-        let delta_start = if delta_line == 0 {
-            start_pos.character - prev_col
+        if start_pos.line == end_pos.line {
+            // Single-line token
+            let length = end_pos.character - start_pos.character;
+
+            let delta_line = start_pos.line - prev_line;
+            let delta_start = if delta_line == 0 {
+                start_pos.character - prev_col
+            } else {
+                start_pos.character
+            };
+
+            semantic_tokens.push(SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type,
+                token_modifiers_bitset: modifiers,
+            });
+
+            prev_line = start_pos.line;
+            prev_col = start_pos.character;
         } else {
-            start_pos.character
-        };
+            // Multi-line token - split into one token per line
+            let token_text = &text[start_byte..end_byte];
+            let mut current_line = start_pos.line;
 
-        semantic_tokens.push(SemanticToken {
-            delta_line,
-            delta_start,
-            length,
-            token_type,
-            token_modifiers_bitset: modifiers,
-        });
+            for (i, line_text) in token_text.split('\n').enumerate() {
+                let line_start_col = if i == 0 { start_pos.character } else { 0 };
+                let line_length = line_text.encode_utf16().count() as u32;
 
-        prev_line = start_pos.line;
-        prev_col = start_pos.character;
+                let delta_line = current_line - prev_line;
+                let delta_start = if delta_line == 0 {
+                    line_start_col - prev_col
+                } else {
+                    line_start_col
+                };
+
+                semantic_tokens.push(SemanticToken {
+                    delta_line,
+                    delta_start,
+                    length: line_length,
+                    token_type,
+                    token_modifiers_bitset: modifiers,
+                });
+
+                prev_line = current_line;
+                prev_col = line_start_col + line_length;
+                current_line += 1;
+            }
+        }
     }
 
     Ok(semantic_tokens)

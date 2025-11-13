@@ -240,14 +240,14 @@ impl<'a> Formatter<'a> {
             ";" if is_symbol => self.write_semicolon(token, next),
             "," if is_symbol => self.write_comma(token, next),
             "(" if is_symbol => self.write_open_paren(token, remaining),
-            ")" if is_symbol => self.write_close_paren(token, next),
+            ")" if is_symbol => self.write_close_paren(token, remaining),
             "[" if is_symbol => self.write_open_bracket(token, next, remaining),
             "]" if is_symbol => self.write_close_bracket(token),
             "." | "::" => self.write_member_access(token),
             "?" => self.write_ternary(token, remaining),
             ":" => self.write_colon(token, next),
             "++" | "--" => self.write_increment(token),
-            "else" if token.kind == TokenKind::Keyword => self.write_else(token, next),
+            "else" if token.kind == TokenKind::Keyword => self.write_else(token, remaining),
             _ if token.kind == TokenKind::Comment => self.write_comment(token),
             _ if token.kind == TokenKind::Blankline => self.write_blankline(),
             _ if token.kind != TokenKind::String && is_operator(token.text.as_str()) => {
@@ -255,6 +255,13 @@ impl<'a> Formatter<'a> {
             },
             _ => self.write_default(token),
         }
+    }
+
+    /// Helper function to find the next non-comment token
+    fn next_non_comment(remaining: &[Token]) -> Option<&Token> {
+        remaining
+            .iter()
+            .find(|t| t.kind != TokenKind::Comment && t.kind != TokenKind::Blankline)
     }
 
     fn ensure_indent(&mut self) {
@@ -615,7 +622,7 @@ impl<'a> Formatter<'a> {
         self.set_prev(token);
     }
 
-    fn write_close_paren(&mut self, token: &Token, next: Option<&Token>) {
+    fn write_close_paren(&mut self, token: &Token, remaining: &[Token]) {
         self.paren_depth = self.paren_depth.saturating_sub(1);
 
         // If we're closing a paren and a ternary indent is active, reset it
@@ -650,7 +657,9 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
         self.output.push(')');
 
-        let next_is_brace = next.is_some_and(|t| t.text == "{");
+        // Look ahead past comments to find the next non-comment token
+        let next_non_comment = Self::next_non_comment(remaining);
+        let next_is_brace = next_non_comment.is_some_and(|t| t.text == "{");
         if next_is_brace {
             // Place opening brace on a new line if the condition was multiline
             if was_multiline {
@@ -1079,12 +1088,16 @@ impl<'a> Formatter<'a> {
         }
 
         if text.contains('\n') {
+            // Multiline comments should be preserved exactly as written
             for (idx, line) in text.lines().enumerate() {
                 if idx > 0 {
                     self.push_newline();
                 }
-                self.ensure_indent();
-                self.output.push_str(line.trim_start());
+                // Only indent the first line; preserve internal formatting
+                if idx == 0 {
+                    self.ensure_indent();
+                }
+                self.output.push_str(line);
             }
             self.push_newline();
             return;
@@ -1104,13 +1117,14 @@ impl<'a> Formatter<'a> {
         self.set_prev(token);
     }
 
-    fn write_else(&mut self, token: &Token, next: Option<&Token>) {
+    fn write_else(&mut self, token: &Token, remaining: &[Token]) {
         self.prepare_token(token);
         self.output.push_str(&token.text);
 
-        // Check if next token is a brace or another 'if'
-        let next_is_brace = next.is_some_and(|t| t.text == "{");
-        let next_is_if = next.is_some_and(|t| t.text == "if");
+        // Look ahead past comments to find the next non-comment token
+        let next_non_comment = Self::next_non_comment(remaining);
+        let next_is_brace = next_non_comment.is_some_and(|t| t.text == "{");
+        let next_is_if = next_non_comment.is_some_and(|t| t.text == "if");
 
         if !next_is_brace && !next_is_if {
             // Auto-insert block for single-statement else
