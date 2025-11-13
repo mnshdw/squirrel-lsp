@@ -4,7 +4,7 @@ use tree_sitter::{Parser, Tree};
 use crate::errors::AnalysisError;
 
 /// Parse Squirrel source code and return the syntax tree
-pub(crate) fn parse_squirrel(text: &str) -> Result<Tree, AnalysisError> {
+pub fn parse_squirrel(text: &str) -> Result<Tree, AnalysisError> {
     let mut parser = Parser::new();
     parser.set_language(tree_sitter_squirrel::language())?;
     parser.parse(text, None).ok_or(AnalysisError::ParseFailed)
