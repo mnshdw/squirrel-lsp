@@ -1534,7 +1534,9 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
     let curr_text = current.text.as_str();
 
     // Never insert spaces inside or around parts of string literals
-    if matches!(prev.kind, TokenKind::String) || matches!(current.kind, TokenKind::String) {
+    if matches!(prev.kind, TokenKind::String)
+        || (matches!(current.kind, TokenKind::String) && prev.kind != TokenKind::Keyword)
+    {
         return false;
     }
 
