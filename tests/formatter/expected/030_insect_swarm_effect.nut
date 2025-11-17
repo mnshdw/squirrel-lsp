@@ -1,6 +1,6 @@
-::Mod_ROTU.ModHook.hook("scripts/skills/effects/insect_swarm_effect", function(q) {
+::Mod_ROTU.ModHook.hook("scripts/skills/effects/insect_swarm_effect", function (q) {
 
-	q.onAdded = @(__original) function() {
+	q.onAdded = @(__original) function () {
 		local actor = this.getContainer().getActor();
 		local crrd = this.getContainer().hasSkill("perk.crrangeddefense")
 			? this.Math.rand(1, 100) <= actor.getBaseProperties().RangedDefense
@@ -39,7 +39,7 @@
 		}
 	}
 
-	q.onUpdate = @(__original) function(_properties) {
+	q.onUpdate = @(__original) function (_properties) {
 
 		if (!this.getContainer().getActor().isPlayerControlled()) //Nerf the effect to -20% stats when it's on an enemy
 		{

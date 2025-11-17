@@ -553,14 +553,6 @@ impl<'a> Formatter<'a> {
         let in_pretty_array = self.in_pretty_array();
         let in_multiline_call = self.in_multiline_call();
 
-        // Skip trailing commas in objects (but allow them in arrays)
-        let is_trailing = matches!(next.map(|t| t.text.as_str()), Some("}"));
-        if is_trailing && in_object_top_level && !in_function_params {
-            self.push_newline();
-            self.set_prev(token);
-            return;
-        }
-
         self.output.push(',');
 
         if in_object_top_level && !in_function_params {
@@ -1599,7 +1591,7 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
 fn keyword_requires_space_before_paren(text: &str) -> bool {
     matches!(
         text,
-        "if" | "for" | "foreach" | "while" | "switch" | "catch"
+        "if" | "for" | "foreach" | "while" | "switch" | "catch" | "function"
     )
 }
 

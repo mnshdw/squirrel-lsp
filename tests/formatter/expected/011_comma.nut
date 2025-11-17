@@ -6,7 +6,7 @@
 			Strength = 400,
 			Cost = 20000,
 			Row = 3,
-			Script = "scripts/entity/tactical/enemies/usurper_boss"
+			Script = "scripts/entity/tactical/enemies/usurper_boss",
 		},
 		EvilKitty = {
 			ID = this.Const.EntityType.EvilKitty,
@@ -14,7 +14,7 @@
 			Strength = 200,
 			Cost = 12500,
 			Row = 2,
-			Script = "scripts/entity/tactical/enemies/evil_kitty"
-		}
+			Script = "scripts/entity/tactical/enemies/evil_kitty",
+		},
 	}
 }

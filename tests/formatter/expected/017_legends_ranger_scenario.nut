@@ -120,7 +120,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.World.getCamera().setPos(this.World.State.m.Player.getPos());
 		local f = nearestVillage.getFactionOfType(this.Const.FactionType.NobleHouse);
 		f.addPlayerRelation(-20.0, "Heard rumors of you poaching in their woods");
-		this.Time.scheduleEvent(this.TimeUnit.Real, 1000, function(_tag) {
+		this.Time.scheduleEvent(this.TimeUnit.Real, 1000, function (_tag) {
 			this.Music.setTrackList(this.Const.Music.IntroTracks, this.Const.Music.CrossFadeTime);
 			this.World.Events.fire("event.legend_ranger_scenario_intro");
 		}, null);
