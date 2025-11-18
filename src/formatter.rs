@@ -67,6 +67,7 @@ struct Token {
     text: String,
     kind: TokenKind,
     preceded_by_newline: bool,
+    preceding_whitespace: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,6 +263,13 @@ impl<'a> Formatter<'a> {
         remaining
             .iter()
             .find(|t| t.kind != TokenKind::Comment && t.kind != TokenKind::Blankline)
+    }
+
+    /// Check if a token is an inline comment (not preceded by newline)
+    fn is_inline_comment(token: &Token) -> bool {
+        token.kind == TokenKind::Comment
+            && token.text.trim_start().starts_with("//")
+            && !token.preceded_by_newline
     }
 
     fn ensure_indent(&mut self) {
@@ -480,10 +488,7 @@ impl<'a> Formatter<'a> {
                     self.prev = None;
                     return;
                 },
-                _ if next_token.kind == TokenKind::Comment
-                    && next_token.text.trim_start().starts_with("//") =>
-                {
-                    self.output.push(' ');
+                _ if Self::is_inline_comment(next_token) => {
                     self.needs_indent = false;
                     return;
                 },
@@ -510,19 +515,9 @@ impl<'a> Formatter<'a> {
             self.ternaries.pop();
         }
 
-        // If a line comment follows on the same line (not preceded by newline), keep it on the same line
-        let next_is_same_line_comment = next
-            .filter(|t| {
-                t.kind == TokenKind::Comment
-                    && t.text.trim_start().starts_with("//")
-                    && !t.preceded_by_newline
-            })
-            .is_some();
-
-        if next_is_same_line_comment {
-            if !matches!(self.output.chars().last(), Some(' ') | Some('\t')) {
-                self.output.push(' ');
-            }
+        // If a line comment follows on the same line (not preceded by newline),
+        // keep it on the same line.
+        if next.is_some_and(Self::is_inline_comment) {
             self.set_prev(token);
             return;
         }
@@ -540,6 +535,7 @@ impl<'a> Formatter<'a> {
                 text: "}".to_string(),
                 kind: TokenKind::Symbol,
                 preceded_by_newline: false,
+                preceding_whitespace: String::new(),
             };
             self.write_close_brace(&synthetic, next);
         }
@@ -554,6 +550,13 @@ impl<'a> Formatter<'a> {
         let in_multiline_call = self.in_multiline_call();
 
         self.output.push(',');
+
+        // If a line comment follows on the same line (not preceded by newline),
+        // keep it on the same line.
+        if next.is_some_and(Self::is_inline_comment) {
+            self.set_prev(token);
+            return;
+        }
 
         if in_object_top_level && !in_function_params {
             match next {
@@ -649,6 +652,9 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
         self.output.push(')');
 
+        // Check if there's an inline comment immediately after the closing paren
+        let next_is_inline_comment = remaining.first().is_some_and(Self::is_inline_comment);
+
         // Look ahead past comments to find the next non-comment token
         let next_non_comment = Self::next_non_comment(remaining);
         let next_is_brace = next_non_comment.is_some_and(|t| t.text == "{");
@@ -656,7 +662,7 @@ impl<'a> Formatter<'a> {
             // Place opening brace on a new line if the condition was multiline
             if was_multiline {
                 self.push_newline();
-            } else {
+            } else if !next_is_inline_comment {
                 self.output.push(' ');
                 self.needs_indent = false;
             }
@@ -1064,9 +1070,20 @@ impl<'a> Formatter<'a> {
 
         if trimmed_text.starts_with("//") {
             if !self.output.is_empty() && !self.output.ends_with('\n') {
-                // Inline comment after code - use trimmed version
-                if !matches!(self.output.chars().last(), Some(' ') | Some('\t')) {
-                    self.output.push(' ');
+                // Inline comment after code - preserve alignment whitespace
+                let spacing: String = token
+                    .preceding_whitespace
+                    .chars()
+                    // Convert tabs to single spaces (tabs in alignment don't make sense)
+                    .map(|c| if c == '\t' { ' ' } else { c })
+                    .collect();
+                // Ensure at least one space if no spacing was preserved
+                if spacing.is_empty() {
+                    if !matches!(self.output.chars().last(), Some(' ') | Some('\t')) {
+                        self.output.push(' ');
+                    }
+                } else {
+                    self.output.push_str(&spacing);
                 }
                 self.output.push_str(trimmed_text);
                 self.push_newline();
@@ -1113,6 +1130,9 @@ impl<'a> Formatter<'a> {
         self.prepare_token(token);
         self.output.push_str(&token.text);
 
+        // Check if there's an inline comment immediately after else
+        let next_is_inline_comment = remaining.first().is_some_and(Self::is_inline_comment);
+
         // Look ahead past comments to find the next non-comment token
         let next_non_comment = Self::next_non_comment(remaining);
         let next_is_brace = next_non_comment.is_some_and(|t| t.text == "{");
@@ -1133,7 +1153,7 @@ impl<'a> Formatter<'a> {
                 case_body_indented: false,
                 is_synthetic: true,
             });
-        } else {
+        } else if !next_is_inline_comment {
             self.output.push(' ');
             self.needs_indent = false;
         }
@@ -1385,8 +1405,10 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
         if !visited_children && node.child_count() == 0 {
             let start = node.start_byte();
             let mut preceded_by_newline = false;
+            let mut preceding_whitespace = String::new();
             if start > prev_end {
-                let newline_count = source[prev_end..start]
+                preceding_whitespace = source[prev_end..start].to_string();
+                let newline_count = preceding_whitespace
                     .chars()
                     .filter(|&ch| ch == '\n')
                     .count();
@@ -1396,6 +1418,7 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
                         text: String::new(),
                         kind: TokenKind::Blankline,
                         preceded_by_newline: true,
+                        preceding_whitespace: String::new(),
                     });
                 }
             }
@@ -1417,6 +1440,7 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
                     kind,
                     text,
                     preceded_by_newline,
+                    preceding_whitespace,
                 });
             }
             prev_end = node.end_byte();
