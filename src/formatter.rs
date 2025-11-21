@@ -1654,6 +1654,7 @@ fn is_operator(text: &str) -> bool {
             | "&="
             | "^="
             | "in"
+            | "instanceof"
     )
 }
 
