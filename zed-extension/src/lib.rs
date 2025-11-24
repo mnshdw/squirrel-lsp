@@ -72,6 +72,9 @@ impl SquirrelExtension {
             .map(|m| m.is_file())
             .unwrap_or(false)
         {
+            fs::create_dir_all(&version_dir)
+                .map_err(|e| format!("Failed to create directory {version_dir}: {e}"))?;
+
             zed::set_language_server_installation_status(
                 language_server_id,
                 &zed::LanguageServerInstallationStatus::Downloading,
