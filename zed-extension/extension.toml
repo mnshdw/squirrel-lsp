@@ -1,0 +1,15 @@
+id = "squirrel"
+name = "Squirrel"
+version = "0.1.0"
+schema_version = 1
+authors = ["mnshdw"]
+description = "🐿️ Squirrel language support"
+repository = "https://github.com/mnshdw/squirrel-lsp"
+
+[grammars.squirrel]
+repository = "https://github.com/mnshdw/tree-sitter-squirrel"
+rev = "7386898087db81ba92e8408bc32b6df9c680a454"
+
+[language_servers.squirrel-lsp]
+name = "Squirrel LSP"
+languages = ["Squirrel"]
