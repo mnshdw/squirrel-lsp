@@ -1,6 +1,6 @@
 id = "squirrel"
 name = "Squirrel"
-version = "0.1.0"
+version = "0.26.0"
 schema_version = 1
 authors = ["mnshdw"]
 description = "🐿️ Squirrel language support"
