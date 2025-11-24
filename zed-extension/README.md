@@ -4,7 +4,7 @@ This extension provides Squirrel language support for the [Zed](https://zed.dev)
 
 - Syntax highlighting via tree-sitter
 - Language Server Protocol (LSP) support via `squirrel-lsp`
-- Code formatting, diagnostics, go to definition, and more
+- Code formatting, diagnostics, and code actions
 
 ## Installation
 
