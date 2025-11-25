@@ -287,10 +287,8 @@ impl ClassRegistry {
                     }
                 }
 
-                if has_new_slot {
-                    if let Some(name) = global_name {
-                        self.register_global(name);
-                    }
+                if has_new_slot && let Some(name) = global_name {
+                    self.register_global(name);
                 }
             }
         }
