@@ -1,6 +1,10 @@
+pub mod class_registry;
 pub mod code_actions;
 pub mod errors;
 pub mod formatter;
 pub mod helpers;
+pub mod hook_analyzer;
+pub mod inheritance_analyzer;
 pub mod semantic_analyzer;
 pub mod syntax_analyzer;
+pub mod tree_sitter_helpers;

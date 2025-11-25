@@ -1,16 +1,24 @@
+mod class_registry;
 mod code_actions;
 mod errors;
 mod formatter;
 mod helpers;
+mod hook_analyzer;
+mod inheritance_analyzer;
 mod semantic_analyzer;
 mod syntax_analyzer;
+mod tree_sitter_helpers;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use class_registry::ClassRegistry;
 use code_actions::generate_code_actions;
 use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
-use semantic_analyzer::compute_semantic_diagnostics;
+use hook_analyzer::analyze_hooks;
+use inheritance_analyzer::analyze_inheritance;
+use semantic_analyzer::compute_semantic_diagnostics_with_globals;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
@@ -32,6 +40,8 @@ use crate::syntax_analyzer::compute_syntax_diagnostics;
 struct Backend {
     client: Client,
     documents: Arc<RwLock<HashMap<Url, String>>>,
+    class_registry: Arc<RwLock<ClassRegistry>>,
+    workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
 }
 
 impl Backend {
@@ -39,7 +49,95 @@ impl Backend {
         Self {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
+            class_registry: Arc::new(RwLock::new(ClassRegistry::new())),
+            workspace_folders: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Recursively find all .nut files in a directory
+    fn find_nut_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Skip common non-source directories
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !name.starts_with('.') && name != "node_modules" && name != "target" {
+                        files.extend(Self::find_nut_files(&path));
+                    }
+                } else if path.extension().is_some_and(|ext| ext == "nut") {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
+    /// Index all .nut files in the workspace
+    async fn index_workspace(&self) {
+        let folders = self.workspace_folders.read().await;
+        if folders.is_empty() {
+            self.client
+                .log_message(MessageType::INFO, "No workspace folders to index")
+                .await;
+            return;
+        }
+
+        let mut all_files = Vec::new();
+        for folder in folders.iter() {
+            all_files.extend(Self::find_nut_files(folder));
+        }
+
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "Indexing {} .nut files for class hierarchy...",
+                    all_files.len()
+                ),
+            )
+            .await;
+
+        let mut registry = self.class_registry.write().await;
+        let mut indexed_count = 0;
+        let mut error_count = 0;
+
+        for file_path in &all_files {
+            if let Ok(content) = std::fs::read_to_string(file_path) {
+                let path_str = file_path.to_string_lossy();
+                if let Err(e) = registry.index_file(&path_str, &content) {
+                    error_count += 1;
+                    // Only log first few errors to avoid spam
+                    if error_count <= 5 {
+                        self.client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("Failed to index {}: {}", path_str, e),
+                            )
+                            .await;
+                    }
+                } else {
+                    indexed_count += 1;
+                }
+            }
+        }
+
+        // Build inheritance relationships after all classes are indexed
+        registry.build_inheritance_graph();
+
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "Indexed {} classes from {} files ({} errors). Registry has {} class paths.",
+                    indexed_count,
+                    all_files.len(),
+                    error_count,
+                    registry.path_to_class.len()
+                ),
+            )
+            .await;
     }
 
     async fn get_document(&self, uri: &Url) -> Option<String> {
@@ -97,7 +195,22 @@ impl Backend {
 
 #[async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Store workspace folders for later indexing
+        let mut folders = self.workspace_folders.write().await;
+        if let Some(workspace_folders) = params.workspace_folders {
+            for folder in workspace_folders {
+                if let Ok(path) = folder.uri.to_file_path() {
+                    folders.push(path);
+                }
+            }
+        } else if let Some(root_uri) = params.root_uri
+            && let Ok(path) = root_uri.to_file_path()
+        {
+            folders.push(path);
+        }
+        drop(folders);
+
         let token_types = vec![
             SemanticTokenType::NAMESPACE,
             SemanticTokenType::TYPE,
@@ -177,8 +290,15 @@ impl LanguageServer for Backend {
         self.client
             .log_message(
                 MessageType::INFO,
-                "Squirrel formatter ready to format documents.",
+                "Squirrel LSP initialized. Starting workspace indexing...",
             )
+            .await;
+
+        // Index the workspace in the background
+        self.index_workspace().await;
+
+        self.client
+            .log_message(MessageType::INFO, "Squirrel LSP ready.")
             .await;
     }
 
@@ -191,6 +311,15 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         store.insert(uri.clone(), text.clone());
+        drop(store);
+
+        // Update class registry for this file
+        if let Ok(path) = uri.to_file_path() {
+            let mut registry = self.class_registry.write().await;
+            let _ = registry.index_file(&path.to_string_lossy(), &text);
+            registry.build_inheritance_graph();
+        }
+
         self.publish_syntax_diagnostics(uri, &text).await;
     }
 
@@ -201,11 +330,17 @@ impl LanguageServer for Backend {
             && let Some(TextDocumentContentChangeEvent { text, .. }) =
                 params.content_changes.into_iter().next_back()
         {
-            *entry = text;
-            // Re-run diagnostics after change
-            let current = entry.clone();
+            *entry = text.clone();
             drop(store);
-            self.publish_syntax_diagnostics(uri, &current).await;
+
+            // Update class registry for this file
+            if let Ok(path) = uri.to_file_path() {
+                let mut registry = self.class_registry.write().await;
+                let _ = registry.index_file(&path.to_string_lossy(), &text);
+                registry.build_inheritance_graph();
+            }
+
+            self.publish_syntax_diagnostics(uri, &text).await;
             return;
         }
     }
@@ -292,14 +427,41 @@ impl Backend {
             },
         };
 
-        // Collect semantic diagnostics
-        match compute_semantic_diagnostics(text) {
+        // Get registry for globals and other analyses
+        let registry = self.class_registry.read().await;
+
+        // Collect semantic diagnostics (with knowledge of workspace globals)
+        match compute_semantic_diagnostics_with_globals(text, registry.globals()) {
             Ok(semantic_diags) => {
                 diags.extend(semantic_diags);
             },
             Err(e) => {
                 self.client
                     .log_message(MessageType::ERROR, format!("Semantic analysis failed: {e}"))
+                    .await;
+            },
+        }
+        match analyze_hooks(text, &registry) {
+            Ok(hook_diags) => {
+                diags.extend(hook_diags);
+            },
+            Err(e) => {
+                self.client
+                    .log_message(MessageType::ERROR, format!("Hook analysis failed: {e}"))
+                    .await;
+            },
+        }
+
+        match analyze_inheritance(text, &registry) {
+            Ok(inherit_diags) => {
+                diags.extend(inherit_diags);
+            },
+            Err(e) => {
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Inheritance analysis failed: {e}"),
+                    )
                     .await;
             },
         }

@@ -55,6 +55,8 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         // Special keywords that are always in scope
         "this",
         "Math",
+        // Battle Brothers framework
+        "inherit",  // Class inheritance function
     ])
 });
 
@@ -156,14 +158,27 @@ pub struct SemanticAnalyzer<'a> {
     scopes: ScopeStack,
     /// Diagnostics collected during analysis
     diagnostics: Vec<Diagnostic>,
+    /// Optional set of known global identifiers from workspace indexing
+    known_globals: Option<&'a HashSet<String>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
+    #[allow(dead_code)] // Used by compute_semantic_diagnostics for tests
     pub fn new(text: &'a str) -> Self {
         Self {
             text,
             scopes: ScopeStack::new(),
             diagnostics: Vec::new(),
+            known_globals: None,
+        }
+    }
+
+    pub fn with_globals(text: &'a str, globals: &'a HashSet<String>) -> Self {
+        Self {
+            text,
+            scopes: ScopeStack::new(),
+            diagnostics: Vec::new(),
+            known_globals: Some(globals),
         }
     }
 
@@ -256,16 +271,25 @@ impl<'a> SemanticAnalyzer<'a> {
                 | "try_statement"
                 | "catch_statement"
                 | "class_declaration"
+                | "table" // Tables create a scope where slot keys are visible
         );
 
         if creates_scope {
             self.push_scope();
         }
 
+        // For tables, pre-declare all table slot keys so they're visible to sibling functions
+        if kind == "table" {
+            self.declare_table_slots(node);
+        }
+
         // Handle other variable declarations
         match kind {
             "local_declaration" | "var_statement" | "const_declaration" => {
                 self.handle_declaration(node);
+            },
+            "update_expression" => {
+                self.handle_new_slot_declaration(node);
             },
             "parameter" => {
                 self.handle_parameter(node);
@@ -329,11 +353,96 @@ impl<'a> SemanticAnalyzer<'a> {
         self.declare_first_identifier(node);
     }
 
+    /// Pre-declare all table slot keys in the current scope
+    /// This makes keys like `m` and function names visible to sibling functions
+    fn declare_table_slots(&mut self, table_node: Node) {
+        // Find table_slots child, then iterate its table_slot children
+        for child in table_node.children(&mut table_node.walk()) {
+            if child.kind() == "table_slots" {
+                for slot in child.children(&mut child.walk()) {
+                    if slot.kind() == "table_slot" {
+                        self.declare_table_slot_key(slot);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract and declare the key from a table_slot
+    fn declare_table_slot_key(&mut self, slot: Node) {
+        for child in slot.children(&mut slot.walk()) {
+            match child.kind() {
+                "identifier" => {
+                    // Simple slot: `m = {}` or `key = value`
+                    let name = self.node_text(child).to_string();
+                    let pos = self.position_at(child.start_byte());
+                    self.declare_variable(&name, pos);
+                    return;
+                },
+                "function_declaration" => {
+                    // Function slot: `function foo() {}`
+                    // The function name is the identifier child of the function_declaration
+                    if let Some(name_node) = child
+                        .children(&mut child.walk())
+                        .find(|c| c.kind() == "identifier")
+                    {
+                        let name = self.node_text(name_node).to_string();
+                        let pos = self.position_at(name_node.start_byte());
+                        self.declare_variable(&name, pos);
+                    }
+                    return;
+                },
+                _ => {},
+            }
+        }
+    }
+
+    /// Handle new slot declarations (name <- value)
+    fn handle_new_slot_declaration(&mut self, node: Node) {
+        // Check if this is a `<-` (new slot) operation
+        let mut has_new_slot_op = false;
+        let mut first_identifier = None;
+
+        for child in node.children(&mut node.walk()) {
+            if child.kind() == "<-" {
+                has_new_slot_op = true;
+            } else if child.kind() == "identifier" && first_identifier.is_none() {
+                first_identifier = Some(child);
+            }
+        }
+
+        // Only treat as declaration if it's `identifier <- ...`
+        if has_new_slot_op && let Some(name_node) = first_identifier {
+            let name = self.node_text(name_node).to_string();
+            let pos = self.position_at(name_node.start_byte());
+            self.declare_variable(&name, pos);
+        }
+    }
+
     /// Handle identifier references (check if they're declared)
     fn handle_identifier(&mut self, node: Node) {
         // Skip if this identifier is part of a declaration (it's handled separately)
         if let Some(parent) = node.parent() {
             let parent_kind = parent.kind();
+
+            // Skip identifiers that are the left-hand side of a new slot declaration
+            // e.g., `character_trait <- inherit(...)` - skip character_trait
+            if parent_kind == "update_expression" {
+                // Check if this is the first identifier and there's a <- operator
+                let mut is_first_id = false;
+                let mut has_new_slot = false;
+                for child in parent.children(&mut parent.walk()) {
+                    if child.kind() == "identifier" && !is_first_id {
+                        is_first_id = child.id() == node.id();
+                    }
+                    if child.kind() == "<-" {
+                        has_new_slot = true;
+                    }
+                }
+                if is_first_id && has_new_slot {
+                    return;
+                }
+            }
 
             // Skip identifiers that are the first child of these declaration types
             // (they are the name being declared)
@@ -432,9 +541,10 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
-    /// Check if a name is a built-in global identifier
+    /// Check if a name is a built-in or known global identifier
     fn is_builtin(&self, name: &str) -> bool {
         BUILTINS.contains(name)
+            || self.known_globals.is_some_and(|g| g.contains(name))
     }
 
     /// Get the text content of a node
@@ -464,10 +574,22 @@ impl<'a> SemanticAnalyzer<'a> {
 }
 
 /// Compute semantic diagnostics for the given text
+#[allow(dead_code)] // Used by tests in code_actions.rs
 pub fn compute_semantic_diagnostics(text: &str) -> Result<Vec<Diagnostic>, AnalysisError> {
     let tree = helpers::parse_squirrel(text)?;
     let root = tree.root_node();
     let analyzer = SemanticAnalyzer::new(text);
+    Ok(analyzer.analyze(root))
+}
+
+/// Compute semantic diagnostics with knowledge of globals from workspace indexing
+pub fn compute_semantic_diagnostics_with_globals(
+    text: &str,
+    globals: &HashSet<String>,
+) -> Result<Vec<Diagnostic>, AnalysisError> {
+    let tree = helpers::parse_squirrel(text)?;
+    let root = tree.root_node();
+    let analyzer = SemanticAnalyzer::with_globals(text, globals);
     Ok(analyzer.analyze(root))
 }
 
