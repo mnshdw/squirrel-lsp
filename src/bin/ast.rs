@@ -20,7 +20,8 @@ fn print_tree(node: Node, source: &str, depth: usize, show_text: bool) {
         String::new()
     };
 
-    let position = format!("{}:{}",
+    let position = format!(
+        "{}:{}",
         node.start_position().row + 1,
         node.start_position().column + 1
     );
@@ -45,7 +46,7 @@ fn main() {
             "--help" | "-h" => {
                 print_usage(&args[0]);
                 std::process::exit(0);
-            }
+            },
             other => {
                 if file_path.is_some() {
                     eprintln!("Error: unexpected argument '{}'", other);
@@ -53,7 +54,7 @@ fn main() {
                     std::process::exit(1);
                 }
                 file_path = Some(other);
-            }
+            },
         }
     }
 
@@ -63,7 +64,7 @@ fn main() {
             eprintln!("Error: missing file argument");
             print_usage(&args[0]);
             std::process::exit(1);
-        }
+        },
     };
 
     let source = fs::read_to_string(file_path).unwrap_or_else(|e| {

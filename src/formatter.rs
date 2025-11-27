@@ -150,8 +150,8 @@ struct TernaryContext {
 pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
     let tree = helpers::parse_squirrel(source).map_err(|_| FormatError::ParseError)?;
     let root = tree.root_node();
-    // Be tolerant of parse errors: many modded Squirrel files (e.g., Battle Brothers mods)
-    // use a more lenient syntax than the official grammar. Tree-sitter still produces a
+    // Be tolerant of parse errors: many Squirrel files use a more lenient syntax
+    // than the official grammar. Tree-sitter still produces a
     // concrete syntax tree with ERROR nodes, so we can continue token collection and
     // formatting without crashing the server or tests. This makes the formatter resilient
     // while the grammar is extended to support lenient variants.

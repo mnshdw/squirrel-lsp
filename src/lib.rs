@@ -1,10 +1,12 @@
-pub mod class_registry;
+pub mod bb_support;
 pub mod code_actions;
 pub mod errors;
 pub mod formatter;
 pub mod helpers;
-pub mod hook_analyzer;
-pub mod inheritance_analyzer;
+pub mod navigation;
 pub mod semantic_analyzer;
+pub mod symbol_extractor;
+pub mod symbol_resolver;
+pub mod symbols;
 pub mod syntax_analyzer;
-pub mod tree_sitter_helpers;
+pub mod workspace;

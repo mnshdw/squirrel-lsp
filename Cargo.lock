@@ -778,7 +778,6 @@ dependencies = [
 [[package]]
 name = "tree-sitter-squirrel"
 version = "1.0.0"
-source = "git+https://github.com/mnshdw/tree-sitter-squirrel?branch=master#ef00cc9a025b39262535a0c520acca7bc9c8890f"
 dependencies = [
  "cc",
  "tree-sitter",

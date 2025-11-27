@@ -1,5 +1,5 @@
 use tower_lsp::lsp_types::Position;
-use tree_sitter::{Parser, Tree};
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::errors::AnalysisError;
 
@@ -64,5 +64,29 @@ pub(crate) fn byte_offset_at(text: &str, position: Position) -> Option<usize> {
         Some(byte_offset)
     } else {
         None
+    }
+}
+
+/// Get the text content of a tree-sitter node
+pub fn node_text<'a>(node: Node, text: &'a str) -> &'a str {
+    node.utf8_text(text.as_bytes()).unwrap_or("")
+}
+
+/// Extract string content from a string literal node.
+///
+/// Tries to find a `string_content` child first, then falls back to
+/// trimming quotes from the node text.
+pub fn extract_string_content(node: Node, text: &str) -> String {
+    for child in node.children(&mut node.walk()) {
+        if child.kind() == "string_content" {
+            return node_text(child, text).to_string();
+        }
+    }
+    // Fallback: trim quotes
+    let s = node_text(node, text);
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
     }
 }

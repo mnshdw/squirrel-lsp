@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use squirrel_lsp::semantic_analyzer::compute_semantic_diagnostics;
+use squirrel_lsp::symbol_resolver::compute_symbol_diagnostics;
 
 #[test]
 fn test_semantic_analyzer() {
@@ -26,10 +26,12 @@ fn test_semantic_analyzer() {
             .unwrap_or_default()
             .to_string();
 
+        let file_path = input_path.to_string_lossy().to_string();
+
         // Parse expected errors from first line comment
         let expected_errors = parse_expected_errors(&input);
 
-        let diagnostics = compute_semantic_diagnostics(&input)
+        let diagnostics = compute_symbol_diagnostics(&file_path, &input)
             .unwrap_or_else(|e| panic!("semantic analysis failed for {}: {}", file_name, e));
 
         // Extract undeclared variable names from diagnostics
@@ -60,6 +62,50 @@ fn test_semantic_analyzer() {
             file_name, expected_errors, actual_errors
         );
     }
+}
+
+/// Test that nested table slots accessed via this.m.x are not flagged as unused
+#[test]
+fn test_nested_table_slot_not_unused() {
+    let code = r#"
+this.skill <- {
+    m = {
+        offHandSkill = null,
+        HandToHand = null
+    },
+
+    function setOffhandSkill(_a) {
+        this.m.offHandSkill = _a;
+    },
+
+    function getHandToHand() {
+        return this.m.HandToHand;
+    }
+}
+"#;
+
+    let diagnostics =
+        compute_symbol_diagnostics("test.nut", code).expect("analysis should succeed");
+
+    // Check for unused variable warnings about offHandSkill or HandToHand
+    let unused_warnings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("Unused"))
+        .collect();
+
+    // Print all diagnostics for debugging
+    for d in &diagnostics {
+        eprintln!("Diagnostic: {} at {:?}", d.message, d.range);
+    }
+
+    assert!(
+        unused_warnings.is_empty(),
+        "Should not have unused warnings for accessed nested table slots, got: {:?}",
+        unused_warnings
+            .iter()
+            .map(|d| &d.message)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Parse expected errors from first line comment
