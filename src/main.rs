@@ -1,38 +1,40 @@
-mod class_registry;
+mod bb_support;
 mod code_actions;
 mod errors;
 mod formatter;
 mod helpers;
-mod hook_analyzer;
-mod inheritance_analyzer;
+mod navigation;
 mod semantic_analyzer;
+mod symbol_extractor;
+mod symbol_resolver;
+mod symbols;
 mod syntax_analyzer;
-mod tree_sitter_helpers;
+mod workspace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use class_registry::ClassRegistry;
+use bb_support::{analyze_hooks, analyze_inheritance};
 use code_actions::generate_code_actions;
 use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
-use hook_analyzer::analyze_hooks;
-use inheritance_analyzer::analyze_inheritance;
-use semantic_analyzer::compute_semantic_diagnostics_with_globals;
+use symbol_resolver::compute_symbol_diagnostics_with_globals;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
     InitializeParams, InitializeResult, MessageType, OneOf, Position, Range, SemanticTokenModifier,
     SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
     SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, SymbolInformation,
     TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextEdit, Url,
+    TextDocumentSyncOptions, TextEdit, Url, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
+use workspace::Workspace;
 
 use crate::semantic_analyzer::compute_semantic_tokens;
 use crate::syntax_analyzer::compute_syntax_diagnostics;
@@ -40,7 +42,7 @@ use crate::syntax_analyzer::compute_syntax_diagnostics;
 struct Backend {
     client: Client,
     documents: Arc<RwLock<HashMap<Url, String>>>,
-    class_registry: Arc<RwLock<ClassRegistry>>,
+    workspace: Arc<RwLock<Workspace>>,
     workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
 }
 
@@ -49,7 +51,7 @@ impl Backend {
         Self {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
-            class_registry: Arc::new(RwLock::new(ClassRegistry::new())),
+            workspace: Arc::new(RwLock::new(Workspace::new())),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -99,21 +101,20 @@ impl Backend {
             )
             .await;
 
-        let mut registry = self.class_registry.write().await;
+        let mut workspace = self.workspace.write().await;
         let mut indexed_count = 0;
         let mut error_count = 0;
 
         for file_path in &all_files {
             if let Ok(content) = std::fs::read_to_string(file_path) {
-                let path_str = file_path.to_string_lossy();
-                if let Err(e) = registry.index_file(&path_str, &content) {
+                if let Err(e) = workspace.index_file(file_path, &content) {
                     error_count += 1;
                     // Only log first few errors to avoid spam
                     if error_count <= 5 {
                         self.client
                             .log_message(
                                 MessageType::WARNING,
-                                format!("Failed to index {}: {}", path_str, e),
+                                format!("Failed to index {}: {}", file_path.display(), e),
                             )
                             .await;
                     }
@@ -123,18 +124,18 @@ impl Backend {
             }
         }
 
-        // Build inheritance relationships after all classes are indexed
-        registry.build_inheritance_graph();
+        // Build inheritance relationships after all files are indexed
+        workspace.build_inheritance_graph();
 
         self.client
             .log_message(
                 MessageType::INFO,
                 format!(
-                    "Indexed {} classes from {} files ({} errors). Registry has {} class paths.",
+                    "Indexed {} files from {} total ({} errors). Workspace has {} script paths.",
                     indexed_count,
                     all_files.len(),
                     error_count,
-                    registry.path_to_class.len()
+                    workspace.files().len()
                 ),
             )
             .await;
@@ -274,6 +275,9 @@ impl LanguageServer for Backend {
                 resolve_provider: Some(false),
                 work_done_progress_options: Default::default(),
             })),
+            definition_provider: Some(OneOf::Left(true)),
+            document_symbol_provider: Some(OneOf::Left(true)),
+            workspace_symbol_provider: Some(OneOf::Left(true)),
             ..ServerCapabilities::default()
         };
 
@@ -313,11 +317,11 @@ impl LanguageServer for Backend {
         store.insert(uri.clone(), text.clone());
         drop(store);
 
-        // Update class registry for this file
+        // Update workspace index for this file
         if let Ok(path) = uri.to_file_path() {
-            let mut registry = self.class_registry.write().await;
-            let _ = registry.index_file(&path.to_string_lossy(), &text);
-            registry.build_inheritance_graph();
+            let mut workspace = self.workspace.write().await;
+            let _ = workspace.index_file(&path, &text);
+            workspace.build_inheritance_graph();
         }
 
         self.publish_syntax_diagnostics(uri, &text).await;
@@ -333,11 +337,11 @@ impl LanguageServer for Backend {
             *entry = text.clone();
             drop(store);
 
-            // Update class registry for this file
+            // Update workspace index for this file
             if let Ok(path) = uri.to_file_path() {
-                let mut registry = self.class_registry.write().await;
-                let _ = registry.index_file(&path.to_string_lossy(), &text);
-                registry.build_inheritance_graph();
+                let mut workspace = self.workspace.write().await;
+                let _ = workspace.index_file(&path, &text);
+                workspace.build_inheritance_graph();
             }
 
             self.publish_syntax_diagnostics(uri, &text).await;
@@ -398,6 +402,67 @@ impl LanguageServer for Backend {
             ))
         }
     }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let text = match self.get_document(&uri).await {
+            Some(text) => text,
+            None => return Ok(None),
+        };
+
+        let file_path = uri.to_file_path().unwrap_or_default();
+        let workspace = self.workspace.read().await;
+
+        if let Some(result) = navigation::find_definition(&text, position, &file_path, &workspace)
+            && let Some(location) = navigation::definition_to_location(result)
+        {
+            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+        }
+
+        Ok(None)
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+
+        let text = match self.get_document(&uri).await {
+            Some(text) => text,
+            None => return Ok(None),
+        };
+
+        let symbols = navigation::get_document_symbols(&text);
+
+        if symbols.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+        }
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = &params.query;
+
+        // Get workspace symbols matching the query
+        let workspace = self.workspace.read().await;
+        let symbols = navigation::get_workspace_symbols(query, &workspace);
+
+        if symbols.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(symbols))
+        }
+    }
 }
 
 fn full_range(text: &str) -> Range {
@@ -427,11 +492,17 @@ impl Backend {
             },
         };
 
-        // Get registry for globals and other analyses
-        let registry = self.class_registry.read().await;
+        // Get workspace for globals and other analyses
+        let workspace = self.workspace.read().await;
 
-        // Collect semantic diagnostics (with knowledge of workspace globals)
-        match compute_semantic_diagnostics_with_globals(text, registry.globals()) {
+        // Get file path from URI for symbol resolution
+        let file_path = uri
+            .to_file_path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| uri.path().to_string());
+
+        // Collect semantic diagnostics using symbol resolver
+        match compute_symbol_diagnostics_with_globals(&file_path, text, workspace.globals()) {
             Ok(semantic_diags) => {
                 diags.extend(semantic_diags);
             },
@@ -441,7 +512,9 @@ impl Backend {
                     .await;
             },
         }
-        match analyze_hooks(text, &registry) {
+
+        // Analyze hooks for method validation
+        match analyze_hooks(text, &workspace) {
             Ok(hook_diags) => {
                 diags.extend(hook_diags);
             },
@@ -452,7 +525,8 @@ impl Backend {
             },
         }
 
-        match analyze_inheritance(text, &registry) {
+        // Analyze inheritance patterns (validates parent paths exist and no circular inheritance)
+        match analyze_inheritance(text, &workspace) {
             Ok(inherit_diags) => {
                 diags.extend(inherit_diags);
             },

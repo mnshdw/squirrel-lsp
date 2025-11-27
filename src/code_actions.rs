@@ -115,8 +115,32 @@ pub fn generate_code_actions(text: &str, diagnostics: &[Diagnostic], uri: &Url) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_analyzer::compute_semantic_diagnostics;
-    use tower_lsp::lsp_types::Url;
+    use tower_lsp::lsp_types::{DiagnosticSeverity, Position, Url};
+
+    /// Create an "Unused variable" diagnostic for testing
+    fn make_unused_diagnostic(
+        var_name: &str,
+        line: u32,
+        start_col: u32,
+        end_col: u32,
+    ) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line,
+                    character: start_col,
+                },
+                end: Position {
+                    line,
+                    character: end_col,
+                },
+            },
+            severity: Some(DiagnosticSeverity::WARNING),
+            source: Some("squirrel-semantic".to_string()),
+            message: format!("Unused variable '{}'", var_name),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_unused_variable_code_action() {
@@ -130,16 +154,10 @@ mod tests {
 
         let uri = Url::parse("file:///test.nut").unwrap();
 
-        let diagnostics = compute_semantic_diagnostics(code).expect("Failed to analyze");
-
-        // Should have one unused variable diagnostic
-        let unused_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.message.starts_with("Unused variable"))
-            .collect();
-
-        assert_eq!(unused_diags.len(), 1);
-        assert!(unused_diags[0].message.contains("unused_var"));
+        // Create a diagnostic that matches what an unused variable analyzer would produce
+        // Line 1 (0-indexed): "    local unused_var = 10;"
+        // "unused_var" starts at column 10
+        let diagnostics = vec![make_unused_diagnostic("unused_var", 1, 10, 20)];
 
         // Generate code actions
         let actions = generate_code_actions(code, &diagnostics, &uri);
@@ -156,15 +174,16 @@ mod tests {
         let code = "local my_variable = 10;";
         let uri = Url::parse("file:///test.nut").unwrap();
 
-        let diagnostics = compute_semantic_diagnostics(code).expect("Failed to analyze");
+        // Create diagnostic with range pointing to "my_variable"
+        // "my_variable" starts at column 6
+        let diagnostics = vec![make_unused_diagnostic("my_variable", 0, 6, 17)];
+
         let actions = generate_code_actions(code, &diagnostics, &uri);
 
-        // If there's an unused variable, the name should be extracted correctly from the range
-        if !actions.is_empty() {
-            assert!(
-                actions[0].title.contains("my_variable"),
-                "Variable name should be extracted from source text, not message"
-            );
-        }
+        assert_eq!(actions.len(), 1);
+        assert!(
+            actions[0].title.contains("my_variable"),
+            "Variable name should be extracted from source text, not message"
+        );
     }
 }

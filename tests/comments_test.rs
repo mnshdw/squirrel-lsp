@@ -9,7 +9,7 @@ fn test_multiline_comments_are_split_per_line() {
     let tokens = compute_semantic_tokens(source).expect("Failed to compute tokens");
 
     // Should have 3 tokens, one for each line of the comment
-    assert_eq!(tokens.len(), 3, "Multi-line comment should be split into 3 tokens");
+    assert_eq!(tokens.len(), 3);
 
     // All tokens should be comment type (17)
     for token in &tokens {
@@ -52,10 +52,13 @@ fn test_inline_multiline_comment() {
     let tokens = compute_semantic_tokens(source).expect("Failed to compute tokens");
 
     // Find the comment token
-    let comment_token = tokens.iter().find(|t| t.token_type == 17).expect("Should have a comment token");
+    let comment_token = tokens
+        .iter()
+        .find(|t| t.token_type == 17)
+        .expect("Should have a comment token");
 
     // Comment should be properly positioned
-    assert_eq!(comment_token.length, 20); // "/* inline comment */"
+    assert_eq!(comment_token.length, 20);
 }
 
 #[test]
@@ -69,5 +72,5 @@ local x = 1;"#;
 
     // Count comment tokens (type 17)
     let comment_count = tokens.iter().filter(|t| t.token_type == 17).count();
-    assert_eq!(comment_count, 3, "Should have 3 comment tokens (1 single-line + 2 multi-line)");
+    assert_eq!(comment_count, 3);
 }

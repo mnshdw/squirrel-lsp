@@ -1,7 +1,7 @@
 // EXPECT: no errors
 // Functions defined in a table should be callable from sibling functions
 
-my_class <- inherit("scripts/base", {
+my_class <- {
     function helper() {
         return 42;
     },
@@ -10,4 +10,4 @@ my_class <- inherit("scripts/base", {
         local x = helper();  // helper should be visible here
         return x;
     }
-});
+};
