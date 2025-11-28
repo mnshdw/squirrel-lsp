@@ -268,7 +268,7 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    fn analyze_function(&mut self, node: Node, parent_ctx: &ResolverContext) {
+    fn analyze_function(&mut self, node: Node, parent_ctx: &mut ResolverContext) {
         let mut ctx = parent_ctx.child();
 
         for child in node.children(&mut node.walk()) {
@@ -310,6 +310,9 @@ impl<'a> SymbolResolver<'a> {
             }
         }
 
+        // Merge references back to parent so variables used in closures
+        // are marked as used in the enclosing scope
+        parent_ctx.merge_references(&ctx);
         self.report_unused_variables(&ctx);
     }
 
@@ -399,7 +402,7 @@ impl<'a> SymbolResolver<'a> {
             match child.kind() {
                 "identifier" | "=" | "static" => {},
                 "function_declaration" => {
-                    self.analyze_function(child, &ctx);
+                    self.analyze_function(child, &mut ctx);
                 },
                 _ => {
                     self.analyze_node(child, &mut ctx);
@@ -466,7 +469,7 @@ impl<'a> SymbolResolver<'a> {
             match child.kind() {
                 "identifier" | "=" | "," => {},
                 "function_declaration" => {
-                    self.analyze_function(child, &ctx);
+                    self.analyze_function(child, &mut ctx);
                 },
                 _ => {
                     self.analyze_node(child, &mut ctx);
@@ -626,12 +629,13 @@ impl<'a> SymbolResolver<'a> {
             return;
         }
 
-        if self.known_globals.is_some_and(|g| g.contains(name)) {
+        // Important: check locals first as they shadow globals
+        if ctx.locals.contains(name) {
+            ctx.record_reference(name);
             return;
         }
 
-        if ctx.locals.contains(name) {
-            ctx.record_reference(name);
+        if self.known_globals.is_some_and(|g| g.contains(name)) {
             return;
         }
 
@@ -1370,5 +1374,64 @@ mod tests {
             .filter(|d| d.message.contains("'idx'"))
             .collect();
         assert_eq!(idx_diags.len(), 1, "idx should be reported as unused");
+    }
+
+    #[test]
+    fn test_closure_captures_outer_variable() {
+        let code = r#"
+            ::mods_hookExactClass("some/path", function (o) {
+                local old_create = o.create;
+                o.create = function () {
+                    old_create();
+                    this.m.IsRemovedAfterBattle = false;
+                }
+            });
+        "#;
+        let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.message.contains("'old_create'"))
+        );
+    }
+
+    #[test]
+    fn test_variable_used_in_nested_if_block() {
+        let code = r#"
+            o.onMissed <- function (_attacker, _skill) {
+                local actor = this.getContainer().getActor();
+                if (_attacker != null
+                    && _attacker.isAlive()
+                    && !_attacker.isAlliedWith(actor)
+                    && _attacker.getTile().getDistanceTo(actor.getTile()) == 1)
+                {
+                    doSomething(actor);
+                }
+            }
+        "#;
+        let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+        assert!(!diagnostics.iter().any(|d| d.message.contains("'actor'")));
+    }
+
+    #[test]
+    fn test_unused_block_variable() {
+        let code = r#"
+            o.onMissed <- function (_attacker, _skill) {
+                local actor = this.getContainer().getActor();
+                if (_attacker != null
+                    && _attacker.isAlive()
+                    && !_attacker.isAlliedWith(actor)
+                    && _attacker.getTile().getDistanceTo(actor.getTile()) == 1
+                    && !_attacker.getCurrentProperties().IsImmuneToDisarm
+                    && !_skill.isIgnoringRiposte()
+                    && _skill.m.IsWeaponSkill)
+                {
+                    ::FOTN.applyVulnerability(actor, _attacker, 1);
+                    this.Sound.play(this.m.ParrySounds[::Math.rand(0, this.m.ParrySounds.len() - 1)], ::Const.Sound.Volume.Skill, actor.getPos());
+                }
+            }
+        "#;
+        let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+        assert!(!diagnostics.iter().any(|d| d.message.contains("'actor'")));
     }
 }
