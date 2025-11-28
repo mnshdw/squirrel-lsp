@@ -1,8 +1,4 @@
 //! Navigation support for Go to Definition, Find References, etc.
-//!
-//! Note: The `deprecated` field in `DocumentSymbol` and `SymbolInformation` is
-//! deprecated in the LSP spec in favor of `tags`. We use `#[allow(deprecated)]`
-//! where needed for backwards compatibility with older clients.
 
 use std::path::Path;
 
@@ -12,17 +8,17 @@ use tower_lsp::lsp_types::{
 use tree_sitter::Node;
 
 use crate::helpers;
-use crate::workspace::Workspace;
+use crate::workspace::{MemberType, Workspace};
 
 #[derive(Debug)]
-pub enum SymbolAtPosition {
+enum SymbolAtPosition {
     InheritParentPath(String),
     MethodCall(String),
     FunctionDeclaration(),
     Identifier(String),
 }
 
-pub fn find_symbol_at_position(text: &str, position: Position) -> Option<SymbolAtPosition> {
+fn find_symbol_at_position(text: &str, position: Position) -> Option<SymbolAtPosition> {
     let tree = helpers::parse_squirrel(text).ok()?;
     let root = tree.root_node();
 
@@ -245,8 +241,8 @@ fn extract_symbol_from_node(node: Node, text: &str) -> Option<DocumentSymbol> {
 
             for child in node.children(&mut node.walk()) {
                 match child.kind() {
-                    "identifier" if name.is_none() => {
-                        name = Some(child.utf8_text(text.as_bytes()).unwrap_or("").to_string());
+                    "identifier" | "deref_expression" if name.is_none() => {
+                        name = helpers::extract_identifier_name(child, text);
                     },
                     "call_expression" => {
                         for call_child in child.children(&mut child.walk()) {
@@ -284,7 +280,6 @@ fn extract_symbol_from_node(node: Node, text: &str) -> Option<DocumentSymbol> {
 
             let children = table_node.map(|t| extract_table_members(t, text));
 
-            #[allow(deprecated)]
             Some(DocumentSymbol {
                 name,
                 detail: None,
@@ -294,6 +289,7 @@ fn extract_symbol_from_node(node: Node, text: &str) -> Option<DocumentSymbol> {
                     SymbolKind::VARIABLE
                 },
                 tags: None,
+                #[allow(deprecated)]
                 deprecated: None,
                 range,
                 selection_range: range,
@@ -316,12 +312,12 @@ fn extract_symbol_from_node(node: Node, text: &str) -> Option<DocumentSymbol> {
                 Position::new(end.row as u32, end.column as u32),
             );
 
-            #[allow(deprecated)]
             Some(DocumentSymbol {
                 name,
                 detail: None,
                 kind: SymbolKind::FUNCTION,
                 tags: None,
+                #[allow(deprecated)]
                 deprecated: None,
                 range,
                 selection_range: range,
@@ -341,12 +337,12 @@ fn extract_symbol_from_node(node: Node, text: &str) -> Option<DocumentSymbol> {
                 Position::new(end.row as u32, end.column as u32),
             );
 
-            #[allow(deprecated)]
             Some(DocumentSymbol {
                 name,
                 detail: None,
                 kind: SymbolKind::VARIABLE,
                 tags: None,
+                #[allow(deprecated)]
                 deprecated: None,
                 range,
                 selection_range: range,
@@ -380,12 +376,12 @@ fn extract_table_members(node: Node, text: &str) -> Vec<DocumentSymbol> {
                         Position::new(end.row as u32, end.column as u32),
                     );
 
-                    #[allow(deprecated)]
                     members.push(DocumentSymbol {
                         name,
                         detail: None,
                         kind: SymbolKind::METHOD,
                         tags: None,
+                        #[allow(deprecated)]
                         deprecated: None,
                         range,
                         selection_range: range,
@@ -408,12 +404,12 @@ fn extract_table_members(node: Node, text: &str) -> Vec<DocumentSymbol> {
                             Position::new(end.row as u32, end.column as u32),
                         );
 
-                        #[allow(deprecated)]
                         members.push(DocumentSymbol {
                             name,
                             detail: None,
                             kind: SymbolKind::METHOD,
                             tags: None,
+                            #[allow(deprecated)]
                             deprecated: None,
                             range,
                             selection_range: range,
@@ -440,12 +436,12 @@ fn extract_table_members(node: Node, text: &str) -> Vec<DocumentSymbol> {
                                     Position::new(end.row as u32, end.column as u32),
                                 );
 
-                                #[allow(deprecated)]
                                 members.push(DocumentSymbol {
                                     name,
                                     detail: None,
                                     kind: SymbolKind::METHOD,
                                     tags: None,
+                                    #[allow(deprecated)]
                                     deprecated: None,
                                     range,
                                     selection_range: range,
@@ -476,12 +472,12 @@ fn extract_table_members(node: Node, text: &str) -> Vec<DocumentSymbol> {
                         Position::new(end.row as u32, end.column as u32),
                     );
 
-                    #[allow(deprecated)]
                     members.push(DocumentSymbol {
                         name,
                         detail: None,
                         kind: SymbolKind::FIELD,
                         tags: None,
+                        #[allow(deprecated)]
                         deprecated: None,
                         range,
                         selection_range: range,
@@ -498,7 +494,6 @@ fn extract_table_members(node: Node, text: &str) -> Vec<DocumentSymbol> {
     members
 }
 
-#[allow(deprecated)]
 pub fn get_workspace_symbols(query: &str, workspace: &Workspace) -> Vec<SymbolInformation> {
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
@@ -511,6 +506,7 @@ pub fn get_workspace_symbols(query: &str, workspace: &Workspace) -> Vec<SymbolIn
                 name: entry.name.clone(),
                 kind: SymbolKind::CLASS,
                 tags: None,
+                #[allow(deprecated)]
                 deprecated: None,
                 location: Location {
                     uri,
@@ -525,12 +521,14 @@ pub fn get_workspace_symbols(query: &str, workspace: &Workspace) -> Vec<SymbolIn
                 && let Ok(uri) = Url::from_file_path(&entry.file_path)
             {
                 let kind = match member.member_type {
-                    crate::workspace::MemberType::Method => SymbolKind::METHOD,
+                    MemberType::Method => SymbolKind::METHOD,
+                    MemberType::Field => SymbolKind::FIELD,
                 };
                 results.push(SymbolInformation {
                     name: member.name.clone(),
                     kind,
                     tags: None,
+                    #[allow(deprecated)]
                     deprecated: None,
                     location: Location {
                         uri,
@@ -571,5 +569,36 @@ mod tests {
 
         let symbol = find_symbol_at_position(code, pos);
         assert!(matches!(symbol, Some(SymbolAtPosition::MethodCall(_))));
+    }
+}
+
+#[cfg(test)]
+mod symbol_tests {
+    use super::*;
+
+    #[test]
+    fn test_document_symbols_real_file() {
+        let content =
+            std::fs::read_to_string("/home/antoine/bb-ws/base_bb/scripts/skills/skill.nut")
+                .expect("Should read file");
+
+        let symbols = get_document_symbols(&content);
+        eprintln!("Document symbols count: {}", symbols.len());
+        for s in &symbols {
+            eprintln!("  - {} ({:?})", s.name, s.kind);
+            if let Some(children) = &s.children {
+                eprintln!("    Children count: {}", children.len());
+                for c in children.iter().take(5) {
+                    eprintln!("      - {} ({:?})", c.name, c.kind);
+                }
+                if children.len() > 5 {
+                    eprintln!("      ... and {} more", children.len() - 5);
+                }
+            } else {
+                eprintln!("    No children!");
+            }
+        }
+
+        assert!(!symbols.is_empty(), "Should have document symbols");
     }
 }

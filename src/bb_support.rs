@@ -30,11 +30,11 @@ pub fn find_inherit_calls<'tree>(root: Node<'tree>, text: &str) -> Vec<InheritCa
             let mut call_expr = None;
 
             for child in node.children(cursor) {
-                if child.kind() == "identifier" && class_name.is_empty() {
-                    class_name = get_node_text(child, text).to_string();
-                } else if child.kind() == "deref_expression" && class_name.is_empty() {
-                    if let Some(last_ident) = find_last_identifier(child) {
-                        class_name = get_node_text(last_ident, text).to_string();
+                if (child.kind() == "identifier" || child.kind() == "deref_expression")
+                    && class_name.is_empty()
+                {
+                    if let Some(name) = helpers::extract_identifier_name(child, text) {
+                        class_name = name;
                     }
                 } else if child.kind() == "<-" {
                     has_new_slot_op = true;
@@ -83,7 +83,7 @@ fn parse_inherit_call<'tree>(
                 }
             },
             "deref_expression" => {
-                if let Some(last) = find_last_identifier(child)
+                if let Some(last) = helpers::find_last_identifier(child)
                     && get_node_text(last, text) == "inherit"
                 {
                     is_inherit = true;
@@ -311,7 +311,7 @@ fn validate_hook_methods(hook: &HookCall, workspace: &Workspace, text: &str) -> 
                 continue;
             }
 
-            if !workspace.has_method(&hook.target_path, &access.member_name) {
+            if !workspace.has_member(&hook.target_path, &access.member_name) {
                 let range = Range::new(
                     helpers::position_at(text, access.member_node.start_byte()),
                     helpers::position_at(text, access.member_node.end_byte()),
@@ -577,20 +577,6 @@ pub fn find_member_accesses<'tree>(root: Node<'tree>, text: &str) -> Vec<MemberA
 
 pub fn get_node_text<'a>(node: Node, text: &'a str) -> &'a str {
     node.utf8_text(text.as_bytes()).unwrap_or("")
-}
-
-fn find_last_identifier(node: Node) -> Option<Node> {
-    let mut last = None;
-    for child in node.children(&mut node.walk()) {
-        if child.kind() == "identifier" {
-            last = Some(child);
-        } else if child.kind() == "deref_expression"
-            && let Some(deeper) = find_last_identifier(child)
-        {
-            last = Some(deeper);
-        }
-    }
-    last
 }
 
 #[cfg(test)]

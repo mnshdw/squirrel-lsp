@@ -28,8 +28,8 @@ pub struct MemberInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemberType {
-    /// A method (function defined in a table/class)
     Method,
+    Field,
 }
 
 /// A file entry in the workspace
@@ -138,12 +138,9 @@ impl Workspace {
         members
     }
 
-    /// Check if a file has a specific method (including inherited)
-    pub fn has_method(&self, script_path: &str, method_name: &str) -> bool {
+    pub fn has_member(&self, script_path: &str, member_name: &str) -> bool {
         let members = self.get_all_members(script_path);
-        members
-            .iter()
-            .any(|m| m.name == method_name && m.member_type == MemberType::Method)
+        members.iter().any(|m| m.name == member_name)
     }
 
     /// Find where a method is defined, searching current class and ancestors.
@@ -421,8 +418,8 @@ fn find_global_table<'tree>(
                 for n in child.children(&mut child.walk()) {
                     match n.kind() {
                         "<-" => has_new_slot = true,
-                        "identifier" if identifier_name.is_none() => {
-                            identifier_name = Some(get_node_text(n, text).to_string());
+                        "identifier" | "deref_expression" if identifier_name.is_none() => {
+                            identifier_name = helpers::extract_identifier_name(n, text);
                         },
                         "table" => table_node = Some(n),
                         _ => {},
@@ -513,25 +510,18 @@ fn extract_members_from_table(node: Node, text: &str) -> Vec<MemberInfo> {
                 }
             },
             "table_slot" => {
-                // Check for `key = function() {}` pattern
-                if let Some(key) = child.child_by_field_name("key") {
-                    let is_function = child.child_by_field_name("value").is_some_and(|v| {
-                        v.kind() == "lambda_expression" || v.kind() == "function_declaration"
-                    });
+                let mut key_node = None;
+                let mut value_node = None;
+                let mut has_function_decl = false;
 
-                    if is_function {
-                        let start = key.start_position();
-                        members.push(MemberInfo {
-                            name: get_node_text(key, text).to_string(),
-                            member_type: MemberType::Method,
-                            line: start.row as u32,
-                            column: start.column as u32,
-                        });
-                    }
-                } else {
-                    // Handle `function name() {}` syntax inside tables
-                    for slot_child in child.children(&mut child.walk()) {
-                        if slot_child.kind() == "function_declaration" {
+                for slot_child in child.children(&mut child.walk()) {
+                    match slot_child.kind() {
+                        "identifier" if key_node.is_none() => {
+                            key_node = Some(slot_child);
+                        },
+                        "function_declaration" => {
+                            has_function_decl = true;
+                            // Extract function name
                             if let Some(name_node) = slot_child.child_by_field_name("name") {
                                 let start = name_node.start_position();
                                 members.push(MemberInfo {
@@ -541,6 +531,7 @@ fn extract_members_from_table(node: Node, text: &str) -> Vec<MemberInfo> {
                                     column: start.column as u32,
                                 });
                             } else {
+                                // Fallback: look for identifier in function_declaration
                                 for c in slot_child.children(&mut slot_child.walk()) {
                                     if c.kind() == "identifier" {
                                         let start = c.start_position();
@@ -554,8 +545,33 @@ fn extract_members_from_table(node: Node, text: &str) -> Vec<MemberInfo> {
                                     }
                                 }
                             }
-                        }
+                        },
+                        "lambda_expression" | "anonymous_function" => {
+                            value_node = Some(slot_child);
+                        },
+                        "table" | "array" | "string" | "integer" | "float" | "bool" => {
+                            value_node = Some(slot_child);
+                        },
+                        _ => {},
                     }
+                }
+
+                if !has_function_decl && let Some(key) = key_node {
+                    let is_function = value_node.is_some_and(|v| {
+                        matches!(v.kind(), "lambda_expression" | "anonymous_function")
+                    });
+
+                    let start = key.start_position();
+                    members.push(MemberInfo {
+                        name: get_node_text(key, text).to_string(),
+                        member_type: if is_function {
+                            MemberType::Method
+                        } else {
+                            MemberType::Field
+                        },
+                        line: start.row as u32,
+                        column: start.column as u32,
+                    });
                 }
             },
             _ => {
@@ -633,14 +649,14 @@ mod tests {
     fn test_index_global_table() {
         let mut workspace = Workspace::new();
         let content = r#"
-statistics_manager <-
-{
-    m = { Flags = null }
+            statistics_manager <-
+            {
+                m = { Flags = null }
 
-    function getFlags() { return m.Flags; }
-    function onSerialize(_out) { m.Flags.onSerialize(_out); }
-}
-"#;
+                function getFlags() { return m.Flags; }
+                function onSerialize(_out) { m.Flags.onSerialize(_out); }
+            }
+        "#;
 
         workspace
             .index_file(
@@ -660,6 +676,18 @@ statistics_manager <-
         let method_names: Vec<&str> = entry.members.iter().map(|m| m.name.as_str()).collect();
         assert!(method_names.contains(&"getFlags"));
         assert!(method_names.contains(&"onSerialize"));
+        assert!(method_names.contains(&"m"));
+
+        // Verify types are correct
+        let m_field = entry.members.iter().find(|m| m.name == "m").unwrap();
+        assert_eq!(m_field.member_type, MemberType::Field, "m should be Field");
+
+        let get_flags = entry.members.iter().find(|m| m.name == "getFlags").unwrap();
+        assert_eq!(
+            get_flags.member_type,
+            MemberType::Method,
+            "getFlags should be Method"
+        );
     }
 
     #[test]
@@ -668,11 +696,11 @@ statistics_manager <-
 
         // First index the parent
         let actor_content = r#"
-this.actor <- this.inherit("scripts/entity/tactical/base", {
-    function onDeath() {}
-    function setFatigue(_f) {}
-});
-"#;
+            this.actor <- this.inherit("scripts/entity/tactical/base", {
+                function onDeath() {}
+                function setFatigue(_f) {}
+            });
+        "#;
         workspace
             .index_file(
                 Path::new("/path/to/scripts/entity/tactical/actor.nut"),
@@ -682,10 +710,10 @@ this.actor <- this.inherit("scripts/entity/tactical/base", {
 
         // Then index the child
         let human_content = r#"
-this.human <- this.inherit("scripts/entity/tactical/actor", {
-    function onTurnStart() {}
-});
-"#;
+            this.human <- this.inherit("scripts/entity/tactical/actor", {
+                function onTurnStart() {}
+            });
+        "#;
         workspace
             .index_file(
                 Path::new("/path/to/scripts/entity/tactical/human.nut"),
@@ -713,10 +741,10 @@ this.human <- this.inherit("scripts/entity/tactical/actor", {
         let mut workspace = Workspace::new();
 
         let actor_content = r#"
-this.actor <- this.inherit("scripts/entity/tactical/base", {
-    function onDeath() {}
-});
-"#;
+            this.actor <- this.inherit("scripts/entity/tactical/base", {
+                function onDeath() {}
+            });
+        "#;
         workspace
             .index_file(
                 Path::new("/path/to/scripts/entity/tactical/actor.nut"),
@@ -725,10 +753,10 @@ this.actor <- this.inherit("scripts/entity/tactical/base", {
             .unwrap();
 
         let human_content = r#"
-this.human <- this.inherit("scripts/entity/tactical/actor", {
-    function onTurnStart() {}
-});
-"#;
+            this.human <- this.inherit("scripts/entity/tactical/actor", {
+                function onTurnStart() {}
+            });
+        "#;
         workspace
             .index_file(
                 Path::new("/path/to/scripts/entity/tactical/human.nut"),
@@ -739,16 +767,16 @@ this.human <- this.inherit("scripts/entity/tactical/actor", {
         workspace.build_inheritance_graph();
 
         // human should have onTurnStart directly
-        assert!(workspace.has_method("entity/tactical/human", "onTurnStart"));
+        assert!(workspace.has_member("entity/tactical/human", "onTurnStart"));
 
         // human should inherit onDeath from actor
-        assert!(workspace.has_method("entity/tactical/human", "onDeath"));
+        assert!(workspace.has_member("entity/tactical/human", "onDeath"));
 
         // actor should have onDeath
-        assert!(workspace.has_method("entity/tactical/actor", "onDeath"));
+        assert!(workspace.has_member("entity/tactical/actor", "onDeath"));
 
         // actor should NOT have onTurnStart
-        assert!(!workspace.has_method("entity/tactical/actor", "onTurnStart"));
+        assert!(!workspace.has_member("entity/tactical/actor", "onTurnStart"));
     }
 
     #[test]
@@ -757,21 +785,21 @@ this.human <- this.inherit("scripts/entity/tactical/actor", {
         let mut workspace = Workspace::new();
 
         let content = r#"/*
- * Comment header
- */
+            * Comment header
+            */
 
-skill <-
-{
-    m =
-    {
-        ID = ""
-    },
+            skill <-
+            {
+                m =
+                {
+                    ID = ""
+                },
 
-    function getContainer() {
-        return m.Container;
-    }
-}
-"#;
+                function getContainer() {
+                    return m.Container;
+                }
+            }
+        "#;
         workspace
             .index_file(Path::new("/path/to/scripts/skills/skill.nut"), content)
             .expect("Should parse");
@@ -788,7 +816,26 @@ skill <-
 
     #[test]
     fn test_index_real_skill_nut() {
-        // Test with the actual base_bb skill.nut file if it exists
+        let code = r#"
+            this.skill <- {
+            };
+        "#;
+        let mut workspace = Workspace::new();
+
+        workspace
+            .index_file(Path::new("scripts/skills/skill"), code)
+            .unwrap();
+
+        let entry = workspace.get("skills/skill");
+        assert!(
+            entry.is_some(),
+            "Should index real skill.nut as 'skills/skill'. Files: {:?}",
+            workspace.files().keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_real_skill_file_members() {
         let file_path = Path::new("/home/antoine/bb-ws/base_bb/scripts/skills/skill.nut");
         if !file_path.exists() {
             eprintln!("Skipping test: {:?} not found", file_path);
@@ -802,11 +849,22 @@ skill <-
             .index_file(file_path, &content)
             .expect("Should parse");
 
-        let entry = workspace.get("skills/skill");
+        let entry = workspace.get("skills/skill").expect("Should find entry");
+        eprintln!("Entry name: {}", entry.name);
+        eprintln!("Members count: {}", entry.members.len());
+        for m in &entry.members {
+            eprintln!("  - {} ({:?})", m.name, m.member_type);
+        }
+
+        // Should have m field
         assert!(
-            entry.is_some(),
-            "Should index real skill.nut as 'skills/skill'. Files: {:?}",
-            workspace.files().keys().collect::<Vec<_>>()
+            entry.members.iter().any(|m| m.name == "m"),
+            "Should have m field"
+        );
+        // Should have getContainer method
+        assert!(
+            entry.members.iter().any(|m| m.name == "getContainer"),
+            "Should have getContainer"
         );
     }
 }

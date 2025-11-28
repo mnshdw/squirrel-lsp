@@ -90,3 +90,37 @@ pub fn extract_string_content(node: Node, text: &str) -> String {
         s.to_string()
     }
 }
+
+/// Extract the name from an identifier or deref_expression node.
+///
+/// For `identifier` nodes, returns the identifier text directly.
+/// For `deref_expression` nodes (like `this.foo`), returns the last identifier (`foo`).
+/// Returns `None` for other node types.
+pub fn extract_identifier_name(node: Node, text: &str) -> Option<String> {
+    find_last_identifier(node).map(|n| node_text(n, text).to_string())
+}
+
+/// Find the last identifier node in a deref_expression chain.
+///
+/// For `identifier` nodes, returns the node itself.
+/// For `deref_expression` nodes (like `this.foo.bar`), returns the last identifier node.
+/// Recursively handles nested deref_expressions.
+pub fn find_last_identifier(node: Node) -> Option<Node> {
+    match node.kind() {
+        "identifier" => Some(node),
+        "deref_expression" => {
+            let mut last = None;
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "identifier" {
+                    last = Some(child);
+                } else if child.kind() == "deref_expression"
+                    && let Some(deeper) = find_last_identifier(child)
+                {
+                    last = Some(deeper);
+                }
+            }
+            last
+        },
+        _ => None,
+    }
+}

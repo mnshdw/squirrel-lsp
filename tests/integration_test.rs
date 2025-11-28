@@ -9,12 +9,12 @@ fn create_test_workspace() -> Workspace {
 
     // Index actor (base class)
     let actor_code = r#"
-this.actor <- this.inherit("scripts/entity/base", {
-    function onDeath() {}
-    function onDamageReceived() {}
-    function setFatigue(_f) {}
-});
-"#;
+        this.actor <- this.inherit("scripts/entity/base", {
+            function onDeath() {}
+            function onDamageReceived() {}
+            function setFatigue(_f) {}
+        });
+    "#;
     workspace
         .index_file(
             Path::new("/test/scripts/entity/tactical/actor.nut"),
@@ -24,10 +24,10 @@ this.actor <- this.inherit("scripts/entity/base", {
 
     // Index human (inherits from actor)
     let human_code = r#"
-this.human <- this.inherit("scripts/entity/tactical/actor", {
-    function create() {}
-});
-"#;
+        this.human <- this.inherit("scripts/entity/tactical/actor", {
+            function create() {}
+        });
+    "#;
     workspace
         .index_file(
             Path::new("/test/scripts/entity/tactical/human.nut"),
@@ -37,10 +37,10 @@ this.human <- this.inherit("scripts/entity/tactical/actor", {
 
     // Index barbarian_thrall (inherits from human)
     let thrall_code = r#"
-this.barbarian_thrall <- this.inherit("scripts/entity/tactical/human", {
-    function create() {}
-});
-"#;
+        this.barbarian_thrall <- this.inherit("scripts/entity/tactical/human", {
+            function create() {}
+        });
+    "#;
     workspace
         .index_file(
             Path::new("/test/scripts/entity/tactical/humans/barbarian_thrall.nut"),
@@ -162,17 +162,17 @@ fn test_method_inheritance() {
 
     // barbarian_thrall should have access to onDeath from actor
     assert!(
-        workspace.has_method("entity/tactical/humans/barbarian_thrall", "onDeath"),
+        workspace.has_member("entity/tactical/humans/barbarian_thrall", "onDeath"),
         "barbarian_thrall should inherit onDeath from actor"
     );
 
     assert!(
-        workspace.has_method("entity/tactical/human", "onDeath"),
+        workspace.has_member("entity/tactical/human", "onDeath"),
         "human should inherit onDeath from actor"
     );
 
     assert!(
-        !workspace.has_method("entity/tactical/actor", "nonExistentMethod"),
+        !workspace.has_member("entity/tactical/actor", "nonExistentMethod"),
         "actor should not have nonExistentMethod"
     );
 }
@@ -272,33 +272,30 @@ fn test_inherit_from_skill_class() {
 
     // First, index the parent skill class
     let skill_code = r#"
-skill <- {
-    m = {
-        Container = null
-    },
+        skill <- {
+            m = {
+                Container = null
+            },
 
-    function getContainer() {
-        return m.Container;
-    }
-};
-"#;
+            function getContainer() {
+                return m.Container;
+            }
+        };
+    "#;
     workspace
-        .index_file(
-            std::path::Path::new("/test/scripts/skills/skill.nut"),
-            skill_code,
-        )
+        .index_file(Path::new("/test/scripts/skills/skill.nut"), skill_code)
         .unwrap();
 
     workspace.build_inheritance_graph();
 
     // Now test the child class that inherits from skill
     let child_code = r#"
-this.perk_legend_ambidextrous <- this.inherit("scripts/skills/skill", {
-    function onAdded() {
-        local off = getContainer().getActor().getOffhandItem();
-    }
-});
-"#;
+        this.perk_legend_ambidextrous <- this.inherit("scripts/skills/skill", {
+            function onAdded() {
+                local off = getContainer().getActor().getOffhandItem();
+            }
+        });
+    "#;
 
     let diagnostics = analyze_inheritance(child_code, &workspace).expect("Analysis should succeed");
 
@@ -320,10 +317,10 @@ fn test_missing_parent_class() {
     let workspace = Workspace::new(); // Empty workspace
 
     let code = r#"
-this.perk <- this.inherit("scripts/skills/skill", {
-    function onAdded() {}
-});
-"#;
+        this.perk <- this.inherit("scripts/skills/skill", {
+            function onAdded() {}
+        });
+    "#;
 
     let diagnostics = analyze_inheritance(code, &workspace).expect("Analysis should succeed");
 
@@ -340,4 +337,45 @@ this.perk <- this.inherit("scripts/skills/skill", {
         errors[0].message.contains("not found"),
         "Error should mention parent not found"
     );
+}
+
+#[test]
+fn test_inherit_hook() {
+    let mut workspace = Workspace::new();
+    let vanilla = r#"
+        this.skill <- {
+        };
+    "#;
+    workspace
+        .index_file(Path::new("scripts/skills/skill.nut"), vanilla)
+        .unwrap();
+    let legends = r#"
+        this.legend_parrying_effect <- this.inherit("scripts/skills/skill", {
+            m = {
+            },
+        });
+    "#;
+    workspace
+        .index_file(
+            Path::new("scripts/skills/effects/legend_parrying_effect.nut"),
+            legends,
+        )
+        .unwrap();
+    let fotn = r#"
+        ::mods_hookExactClass("skills/effects/legend_parrying_effect", function ( o )
+        {
+            o.m.ParrySounds <- [
+                "sounds/combat/legend_parried_01.wav",
+            ];
+        });
+    "#;
+    // workspace
+    //     .index_file(
+    //         Path::new("hooks/skills/effects/legend_parrying_effect.nut"),
+    //         fotn,
+    //     )
+    //     .unwrap();
+    let diagnostics = analyze_inheritance(fotn, &workspace).unwrap();
+    eprintln!("Diagnostics: {:?}", diagnostics);
+    assert!(diagnostics.is_empty());
 }
