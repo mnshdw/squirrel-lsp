@@ -1,8 +1,10 @@
 ## Squirrel Language Server (squirrel-lsp)
 
-Rust-based Language Server Protocol (LSP) implementation for the Squirrel language (`.nut`) with VS Code and Zed editor extensions.
+Rust-based Language Server Protocol (LSP) implementation for the Squirrel language (`.nut`) with a VS Code extension.
 
-The VS Code extension bundles prebuilt `squirrel-lsp` binaries for major platforms, so most users don’t need to download or configure anything extra.
+The VS Code extension bundles prebuilt `squirrel-lsp` binaries for major platforms, so most users don't need to download or configure anything extra.
+
+For Zed editor support, see [squirrel-lsp-zed](https://github.com/mnshdw/squirrel-lsp-zed).
 
 ---
 
@@ -28,19 +30,6 @@ Open any `.nut` file to activate the extension. Check Output → "Squirrel LSP (
   "[squirrel]": {
     "editor.formatOnSave": true
   }` to your settings for auto-format on save.
-
----
-
-## Install in Zed
-
-1. Open Zed
-2. Go to Extensions (`Cmd+Shift+X`)
-3. Search for "Squirrel"
-4. Click Install
-
-The LSP binary will be downloaded automatically from GitHub releases.
-
-For manual installation or custom builds, see the [Zed extension README](./zed-extension/README.md).
 
 ---
 
