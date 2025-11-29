@@ -162,7 +162,7 @@ impl<'a> SymbolResolver<'a> {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "local_declaration" | "var_statement" | "const_declaration" => {
-                    if let Some(ident) = self.find_declaration_name(child) {
+                    for ident in self.find_all_declaration_names(child) {
                         let name = self.node_text(ident).to_string();
                         let range = Range::new(
                             self.position_at(ident.start_byte()),
@@ -343,7 +343,7 @@ impl<'a> SymbolResolver<'a> {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "local_declaration" | "var_statement" | "const_declaration" => {
-                    if let Some(ident) = self.find_declaration_name(child) {
+                    for ident in self.find_all_declaration_names(child) {
                         let name = self.node_text(ident).to_string();
                         let range = Range::new(
                             self.position_at(ident.start_byte()),
@@ -510,16 +510,25 @@ impl<'a> SymbolResolver<'a> {
     }
 
     fn analyze_declaration(&mut self, node: Node, ctx: &mut ResolverContext) {
-        let mut seen_declaration_name = false;
+        let mut expect_decl_name = true;
         for child in node.children(&mut node.walk()) {
-            if matches!(child.kind(), "local" | "var" | "const" | "=") {
-                continue;
+            match child.kind() {
+                "local" | "var" | "const" => {
+                    expect_decl_name = true;
+                },
+                "," => {
+                    expect_decl_name = true;
+                },
+                "=" => {
+                    expect_decl_name = false;
+                },
+                "identifier" if expect_decl_name => {
+                    expect_decl_name = false;
+                },
+                _ => {
+                    self.analyze_node(child, ctx);
+                },
             }
-            if child.kind() == "identifier" && !seen_declaration_name {
-                seen_declaration_name = true;
-                continue;
-            }
-            self.analyze_node(child, ctx);
         }
     }
 
@@ -745,8 +754,7 @@ impl<'a> SymbolResolver<'a> {
                 },
                 "global_variable" => {
                     for subchild in child.children(&mut child.walk()) {
-                        if subchild.kind() == "identifier"
-                            && self.node_text(subchild) == "inherit"
+                        if subchild.kind() == "identifier" && self.node_text(subchild) == "inherit"
                         {
                             return true;
                         }
@@ -805,6 +813,28 @@ impl<'a> SymbolResolver<'a> {
     fn find_declaration_name<'b>(&self, node: Node<'b>) -> Option<Node<'b>> {
         node.children(&mut node.walk())
             .find(|&child| child.kind() == "identifier")
+    }
+
+    fn find_all_declaration_names<'b>(&self, node: Node<'b>) -> Vec<Node<'b>> {
+        let mut names = Vec::new();
+        let mut expect_decl_name = true;
+
+        for child in node.children(&mut node.walk()) {
+            match child.kind() {
+                "local" | "var" | "const" | "," => {
+                    expect_decl_name = true;
+                },
+                "=" => {
+                    expect_decl_name = false;
+                },
+                "identifier" if expect_decl_name => {
+                    names.push(child);
+                    expect_decl_name = false;
+                },
+                _ => {},
+            }
+        }
+        names
     }
 
     fn find_first_identifier<'b>(&self, node: Node<'b>) -> Option<Node<'b>> {
@@ -1455,8 +1485,6 @@ mod tests {
 
     #[test]
     fn test_inherited_function_call_in_nested_table() {
-        // Reproduces issue: getName() inside a table inside an array inside a function
-        // inside an inherit call is incorrectly reported as undeclared
         let code = r#"
             this.test <- ::inherit("scripts/parent", {
                 function getTooltip() {
@@ -1469,10 +1497,18 @@ mod tests {
             });
         "#;
         let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
-        let undeclared: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.message.contains("Undeclared"))
-            .collect();
-        assert!(undeclared.is_empty(), "Got undeclared errors: {:?}", undeclared);
+        assert!(!diagnostics.iter().any(|d| d.message.contains("Undeclared")));
+    }
+
+    #[test]
+    fn test_multi_variable_declaration() {
+        let code = r#"
+            function test() {
+                local s1 = null, s2 = null, s3 = null;
+                return s1 + s2 + s3;
+            }
+        "#;
+        let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+        assert!(!diagnostics.iter().any(|d| d.message.contains("Undeclared")));
     }
 }
