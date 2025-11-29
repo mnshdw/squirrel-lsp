@@ -743,6 +743,15 @@ impl<'a> SymbolResolver<'a> {
                         return true;
                     }
                 },
+                "global_variable" => {
+                    for subchild in child.children(&mut child.walk()) {
+                        if subchild.kind() == "identifier"
+                            && self.node_text(subchild) == "inherit"
+                        {
+                            return true;
+                        }
+                    }
+                },
                 "deref_expression" => {
                     let mut last_ident = "";
                     for subchild in child.children(&mut child.walk()) {
@@ -1442,5 +1451,28 @@ mod tests {
         "#;
         let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
         assert!(!diagnostics.iter().any(|d| d.message.contains("'actor'")));
+    }
+
+    #[test]
+    fn test_inherited_function_call_in_nested_table() {
+        // Reproduces issue: getName() inside a table inside an array inside a function
+        // inside an inherit call is incorrectly reported as undeclared
+        let code = r#"
+            this.test <- ::inherit("scripts/parent", {
+                function getTooltip() {
+                    return [
+                        {
+                            text = getName()
+                        }
+                    ];
+                }
+            });
+        "#;
+        let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+        let undeclared: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.message.contains("Undeclared"))
+            .collect();
+        assert!(undeclared.is_empty(), "Got undeclared errors: {:?}", undeclared);
     }
 }
