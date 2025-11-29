@@ -108,6 +108,21 @@ this.skill <- {
     );
 }
 
+#[test]
+fn test_variable_used_in_table_literal_value() {
+    let code = r#"
+        function testFunc(_targetTile) {
+            local skillToUse = 5;
+            ::Time.scheduleEvent(1, 2, 3, {
+                TargetTile = _targetTile,
+                Skill = skillToUse
+            });
+        }
+    "#;
+    let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+    assert!(!diagnostics.iter().any(|d| d.message.contains("skillToUse")));
+}
+
 /// Parse expected errors from first line comment
 /// Format: // EXPECT: var1, var2, var3
 /// Or: // EXPECT: no errors

@@ -444,10 +444,10 @@ impl<'a> SymbolResolver<'a> {
         None
     }
 
-    fn analyze_table(&mut self, node: Node, parent_ctx: &ResolverContext) {
+    fn analyze_table(&mut self, node: Node, parent_ctx: &mut ResolverContext) {
         let slots = self.extract_table_slot_names(node);
 
-        let mut ctx = parent_ctx.clone();
+        let mut ctx = parent_ctx.child();
         for slot in &slots {
             ctx.locals.insert(slot.clone());
         }
@@ -456,23 +456,31 @@ impl<'a> SymbolResolver<'a> {
             if child.kind() == "table_slots" {
                 for slot in child.children(&mut child.walk()) {
                     if slot.kind() == "table_slot" {
-                        self.analyze_table_slot(slot, &ctx);
+                        self.analyze_table_slot(slot, &mut ctx);
                     }
                 }
             }
         }
+
+        parent_ctx.merge_references(&ctx);
     }
 
-    fn analyze_table_slot(&mut self, node: Node, ctx: &ResolverContext) {
-        let mut ctx = ctx.clone();
+    fn analyze_table_slot(&mut self, node: Node, ctx: &mut ResolverContext) {
+        let mut saw_equals = false;
         for child in node.children(&mut node.walk()) {
             match child.kind() {
-                "identifier" | "=" | "," => {},
+                "=" => {
+                    saw_equals = true;
+                },
+                "identifier" if !saw_equals => {
+                    // This is the slot name (key), skip it
+                },
+                "," => {},
                 "function_declaration" => {
-                    self.analyze_function(child, &mut ctx);
+                    self.analyze_function(child, ctx);
                 },
                 _ => {
-                    self.analyze_node(child, &mut ctx);
+                    self.analyze_node(child, ctx);
                 },
             }
         }
@@ -491,7 +499,8 @@ impl<'a> SymbolResolver<'a> {
                             ctx.locals.insert(slot.clone());
                         }
 
-                        self.analyze_table(arg, &ctx);
+                        self.analyze_table(arg, &mut ctx);
+                        parent_ctx.merge_references(&ctx);
                     } else {
                         self.analyze_node(arg, parent_ctx);
                     }
