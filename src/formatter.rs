@@ -86,6 +86,7 @@ enum TokenKind {
 struct PrevToken {
     text: String,
     kind: TokenKind,
+    was_unary: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,7 @@ enum BraceKind {
     ObjectInline,
     ObjectMultiline,
     Block,
+    BlockInline,
     Switch,
 }
 
@@ -102,7 +104,7 @@ impl BraceKind {
     }
 
     fn is_inline(self) -> bool {
-        matches!(self, BraceKind::ObjectInline)
+        matches!(self, BraceKind::ObjectInline | BraceKind::BlockInline)
     }
 }
 
@@ -182,8 +184,7 @@ struct Formatter<'a> {
     bracket_depth: usize,
     needs_indent: bool,
     pending_space: bool,
-    prev_was_unary: bool,
-    prev: Option<PrevToken>,
+    prev: Vec<PrevToken>,
     braces: Vec<BraceContext>,
     parens: Vec<ParenContext>,
     brackets: Vec<BracketContext>,
@@ -192,7 +193,6 @@ struct Formatter<'a> {
     last_closed_paren_kind: Option<ParenKind>,
     // Track the paren_depth at which we started breaking logical operators
     breaking_logical_at_depth: Option<usize>,
-    // Stack of multiline ternary contexts (for nested ternaries)
 }
 
 impl<'a> Formatter<'a> {
@@ -205,8 +205,7 @@ impl<'a> Formatter<'a> {
             bracket_depth: 0,
             needs_indent: true,
             pending_space: false,
-            prev_was_unary: false,
-            prev: None,
+            prev: Vec::new(),
             braces: Vec::new(),
             parens: Vec::new(),
             brackets: Vec::new(),
@@ -362,28 +361,44 @@ impl<'a> Formatter<'a> {
         }
         self.needs_indent = true;
         self.pending_space = false;
-        self.prev = None;
+        self.prev.clear();
+    }
+
+    fn prev(&self) -> Option<&PrevToken> {
+        self.prev.last()
+    }
+
+    fn prev_n(&self, n: usize) -> Option<&PrevToken> {
+        let len = self.prev.len();
+        if len > n {
+            self.prev.get(len - 1 - n)
+        } else {
+            None
+        }
+    }
+
+    fn push_prev(&mut self, token: &Token, was_unary: bool) {
+        self.prev.push(PrevToken {
+            text: token.text.clone(),
+            kind: token.kind,
+            was_unary,
+        });
+        // Keep only last few tokens
+        if self.prev.len() > 3 {
+            self.prev.remove(0);
+        }
     }
 
     fn set_prev(&mut self, token: &Token) {
-        self.prev = Some(PrevToken {
-            text: token.text.clone(),
-            kind: token.kind,
-        });
+        self.push_prev(token, false);
     }
 
     fn prepare_token(&mut self, token: &Token) {
         self.ensure_indent();
         self.apply_pending_space();
-        if !self.prev_was_unary
-            && needs_space(self.prev.as_ref(), token)
-            && !self.ends_with_whitespace()
-        {
+        let prev_was_unary = self.prev().is_some_and(|p| p.was_unary);
+        if !prev_was_unary && needs_space(self.prev(), token) && !self.ends_with_whitespace() {
             self.output.push(' ');
-        }
-        // Only suppress a single post-unary space
-        if self.prev_was_unary {
-            self.prev_was_unary = false;
         }
     }
 
@@ -394,17 +409,18 @@ impl<'a> Formatter<'a> {
         // Check if the previous closing paren was for a switch statement
         let is_switch = matches!(self.last_closed_paren_kind, Some(ParenKind::Switch));
         let is_block = self
-            .prev
-            .as_ref()
+            .prev()
             .is_some_and(|p| p.text == ")" || is_block_introducing_keyword(p.text.as_str()));
+        let is_empty = matches!(next.map(|n| n.text.as_str()), Some("}"));
 
         let kind = if is_switch {
             BraceKind::Switch
+        } else if is_empty && !is_block {
+            BraceKind::ObjectInline
+        } else if is_empty && matches!(self.last_closed_paren_kind, Some(ParenKind::Function)) {
+            BraceKind::BlockInline
         } else if is_block {
             BraceKind::Block
-        } else if matches!(next.map(|n| n.text.as_str()), Some("}")) {
-            // Empty objects {} are always inline
-            BraceKind::ObjectInline
         } else {
             BraceKind::ObjectMultiline
         };
@@ -485,7 +501,7 @@ impl<'a> Formatter<'a> {
                 "else" | "catch" | "finally" | "while" => {
                     self.output.push(' ');
                     self.needs_indent = false;
-                    self.prev = None;
+                    self.prev.clear();
                     return;
                 },
                 _ if Self::is_inline_comment(next_token) => {
@@ -496,7 +512,7 @@ impl<'a> Formatter<'a> {
             }
         }
 
-        if !inline {
+        if !inline || kind == Some(BraceKind::BlockInline) {
             self.push_newline();
         }
     }
@@ -582,11 +598,12 @@ impl<'a> Formatter<'a> {
         self.output.push('(');
         self.paren_depth += 1;
 
-        let kind = match self.prev.as_ref().map(|p| p.text.as_str()) {
+        let kind = match self.prev().map(|p| p.text.as_str()) {
             Some("for") => ParenKind::For,
             Some("if") => ParenKind::If,
             Some("switch") => ParenKind::Switch,
             Some("function") => ParenKind::Function,
+            _ if self.prev_n(1).is_some_and(|p| p.text == "function") => ParenKind::Function,
             _ => ParenKind::Regular,
         };
 
@@ -692,7 +709,7 @@ impl<'a> Formatter<'a> {
         self.bracket_depth += 1;
 
         // Detect if this is an array subscript (foo[x]) vs array literal ([1, 2, 3])
-        let is_subscript = self.prev.as_ref().is_some_and(|p| {
+        let is_subscript = self.prev().is_some_and(|p| {
             matches!(
                 p.kind,
                 TokenKind::Identifier | TokenKind::Number | TokenKind::String
@@ -776,13 +793,14 @@ impl<'a> Formatter<'a> {
     fn write_member_access(&mut self, token: &Token) {
         self.prepare_token(token);
 
-        let keep_space = self.prev.as_ref().is_some_and(|p| {
-            p.kind == TokenKind::Keyword
-                || is_operator(&p.text)
-                || p.text == ","
-                || p.text == ":"
-                || p.text == "?"
-        });
+        let keep_space = token.text == "::"
+            || self.prev().is_some_and(|p| {
+                p.kind == TokenKind::Keyword
+                    || is_operator(&p.text)
+                    || p.text == ","
+                    || p.text == ":"
+                    || p.text == "?"
+            });
         if self.output.ends_with(' ') && !keep_space {
             self.output.pop();
         }
@@ -847,7 +865,7 @@ impl<'a> Formatter<'a> {
         }
 
         // Decide between ternary colon and object property colon
-        let prev_is_question = self.prev.as_ref().is_some_and(|p| p.text.as_str() == "?");
+        let prev_is_question = self.prev().is_some_and(|p| p.text.as_str() == "?");
         let in_object_property = self.in_object_property_position();
 
         if !self.ternaries.is_empty() && !in_object_property {
@@ -905,7 +923,7 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_operator(&mut self, token: &Token, remaining: &[Token]) {
-        if is_unary_operator(token.text.as_str()) && is_unary_context(self.prev.as_ref()) {
+        if is_unary_operator(token.text.as_str()) && is_unary_context(self.prev()) {
             self.write_unary_operator(token);
             return;
         }
@@ -934,10 +952,9 @@ impl<'a> Formatter<'a> {
     fn write_unary_operator(&mut self, token: &Token) {
         self.prepare_token(token);
         self.output.push_str(&token.text);
-        // Mark that the previous token was a unary operator so the next token doesn't
+        // Mark that this was a unary operator so the next token doesn't
         // get a space inserted after it.
-        self.prev_was_unary = true;
-        self.set_prev(token);
+        self.push_prev(token, true);
     }
 
     fn is_in_condition(&self) -> bool {
@@ -1195,7 +1212,7 @@ impl<'a> Formatter<'a> {
         self.output.push('\n');
         self.needs_indent = true;
         self.pending_space = false;
-        self.prev = None;
+        self.prev.clear();
     }
 
     fn estimate_token_spacing(&self, prev_text: &str, token: &Token) -> usize {
@@ -1564,7 +1581,11 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
         return false;
     }
 
-    if matches!(curr_text, "." | "::") {
+    if curr_text == "::" {
+        return true;
+    }
+
+    if curr_text == "." {
         return prev.kind == TokenKind::Keyword;
     }
 
