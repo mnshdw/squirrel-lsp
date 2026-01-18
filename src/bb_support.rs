@@ -360,10 +360,7 @@ fn validate_hook_type(hook: &HookCall, workspace: &Workspace, text: &str) -> Vec
 
     match hook.hook_type {
         HookType::Exact if has_children => {
-            let range = Range::new(
-                helpers::position_at(text, hook.node.start_byte()),
-                helpers::position_at(text, hook.node.end_byte()),
-            );
+            let range = first_line_range(hook.node, text);
 
             diagnostics.push(Diagnostic {
                 range,
@@ -380,10 +377,7 @@ fn validate_hook_type(hook: &HookCall, workspace: &Workspace, text: &str) -> Vec
             });
         },
         HookType::Descendants if !has_children => {
-            let range = Range::new(
-                helpers::position_at(text, hook.node.start_byte()),
-                helpers::position_at(text, hook.node.end_byte()),
-            );
+            let range = first_line_range(hook.node, text);
 
             diagnostics.push(Diagnostic {
                 range,
@@ -403,6 +397,20 @@ fn validate_hook_type(hook: &HookCall, workspace: &Workspace, text: &str) -> Vec
     }
 
     diagnostics
+}
+
+/// Returns a range covering only the first line of the node
+fn first_line_range(node: Node, text: &str) -> Range {
+    let start_byte = node.start_byte();
+    let end_byte = node.end_byte();
+    let first_line_end = text[start_byte..end_byte]
+        .find('\n')
+        .map(|i| start_byte + i)
+        .unwrap_or(end_byte);
+    Range::new(
+        helpers::position_at(text, start_byte),
+        helpers::position_at(text, first_line_end),
+    )
 }
 
 pub fn analyze_inheritance(
