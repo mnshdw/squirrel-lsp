@@ -990,6 +990,10 @@ impl<'a> Formatter<'a> {
             && self.parens.last().is_some_and(|f| f.multiline)
         {
             true
+        } else if is_logical_op && self.breaking_logical_at_depth == Some(self.paren_depth) {
+            // We've already started breaking logical operators at this depth,
+            // continue breaking for consistency
+            true
         } else if is_logical_op {
             let estimated_remaining = if in_condition {
                 self.estimate_paren_content_length(remaining)
