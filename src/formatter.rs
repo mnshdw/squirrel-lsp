@@ -96,6 +96,7 @@ enum BraceKind {
     Block,
     BlockInline,
     Switch,
+    DoBlock,
 }
 
 impl BraceKind {
@@ -412,9 +413,12 @@ impl<'a> Formatter<'a> {
             .prev()
             .is_some_and(|p| p.text == ")" || is_block_introducing_keyword(p.text.as_str()));
         let is_empty = matches!(next.map(|n| n.text.as_str()), Some("}"));
+        let is_do = self.prev().is_some_and(|p| p.text == "do");
 
         let kind = if is_switch {
             BraceKind::Switch
+        } else if is_do {
+            BraceKind::DoBlock
         } else if is_empty && !is_block {
             BraceKind::ObjectInline
         } else if is_empty && matches!(self.last_closed_paren_kind, Some(ParenKind::Function)) {
@@ -494,11 +498,17 @@ impl<'a> Formatter<'a> {
         // Determine what follows the brace
         if let Some(next_token) = next {
             match next_token.text.as_str() {
-                ")" | ";" | "," => {
+                ")" | ";" | "," | "." => {
                     self.needs_indent = false;
                     return;
                 },
-                "else" | "catch" | "finally" | "while" => {
+                "else" | "catch" | "finally" => {
+                    self.output.push(' ');
+                    self.needs_indent = false;
+                    self.prev.clear();
+                    return;
+                },
+                "while" if kind == Some(BraceKind::DoBlock) => {
                     self.output.push(' ');
                     self.needs_indent = false;
                     self.prev.clear();

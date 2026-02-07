@@ -234,6 +234,14 @@ impl<'a> SymbolResolver<'a> {
                 }
             },
             "local_declaration" | "var_statement" => {
+                for ident in self.find_all_declaration_names(node) {
+                    let name = self.node_text(ident).to_string();
+                    let range = Range::new(
+                        self.position_at(ident.start_byte()),
+                        self.position_at(ident.end_byte()),
+                    );
+                    ctx.add_declaration(name, range, DeclarationKind::Local);
+                }
                 self.analyze_declaration(node, ctx);
                 return;
             },
