@@ -1634,6 +1634,10 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
         return true;
     }
 
+    if prev_text == ")" && current.kind == TokenKind::Identifier {
+        return true;
+    }
+
     false
 }
 
@@ -1657,6 +1661,7 @@ fn is_operator(text: &str) -> bool {
             | "!="
             | "<"
             | "<="
+            | "<=>"
             | ">"
             | ">="
             | "&&"
