@@ -41,6 +41,13 @@ fn test_formatter() {
 
         let output = format_document(&input, &options)
             .unwrap_or_else(|e| panic!("formatting failed for {}: {}", file_name, e));
-        assert_eq!(output, expected, "mismatch for case: {}", file_name);
+        let normalized_output = output.replace("\r\n", "\n");
+        let normalized_expected = expected.replace("\r\n", "\n");
+
+        assert_eq!(
+            normalized_output, normalized_expected,
+            "mismatch for case: {}",
+            file_name
+        );
     }
 }

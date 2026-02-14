@@ -1595,6 +1595,12 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
         return false;
     }
 
+    if (curr_text == "extends" && current.kind == TokenKind::Keyword)
+        || (prev_text == "extends" && prev.kind == TokenKind::Keyword)
+    {
+        return true;
+    }
+
     if curr_text == "::" {
         return true;
     }
