@@ -1654,7 +1654,15 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
 fn keyword_requires_space_before_paren(text: &str) -> bool {
     matches!(
         text,
-        "if" | "for" | "foreach" | "while" | "switch" | "catch" | "function"
+        "if" | "for"
+            | "foreach"
+            | "while"
+            | "switch"
+            | "catch"
+            | "function"
+            | "return"
+            | "throw"
+            | "yield"
     )
 }
 
