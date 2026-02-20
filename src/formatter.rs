@@ -754,9 +754,15 @@ impl<'a> Formatter<'a> {
         };
 
         // If the input had a newline after '[', keep it for consistency
-        let user_pref = remaining
-            .first()
-            .is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), "]"));
+        let user_pref = {
+            let first = remaining.first();
+            let check_token = if first.is_some_and(Self::is_inline_comment) {
+                remaining.get(1)
+            } else {
+                first
+            };
+            check_token.is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), "]"))
+        };
 
         // Pretty-print if:
         // - Contains complex elements (objects/arrays)
@@ -770,7 +776,9 @@ impl<'a> Formatter<'a> {
         });
 
         if should_pretty_print {
-            self.push_newline();
+            if !remaining.first().is_some_and(Self::is_inline_comment) {
+                self.push_newline();
+            }
             self.indent_level += 1;
         }
         self.set_prev(token);
