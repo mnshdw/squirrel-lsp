@@ -2,7 +2,7 @@
   "name": "squirrel-lsp-vscode",
   "displayName": "Squirrel",
   "description": "🐿️ Squirrel language support",
-  "version": "0.37.0",
+  "version": "0.38.0",
   "publisher": "mnshdw",
   "license": "MIT",
   "icon": "squirrel.png",
