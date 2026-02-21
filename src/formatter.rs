@@ -1634,7 +1634,9 @@ fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
         return true;
     }
 
-    if prev.kind == TokenKind::Identifier && current.kind == TokenKind::Identifier {
+    if prev.kind == TokenKind::Identifier
+        && matches!(current.kind, TokenKind::Identifier | TokenKind::Keyword)
+    {
         return true;
     }
 
