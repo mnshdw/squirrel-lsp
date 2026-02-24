@@ -1217,10 +1217,6 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_blankline(&mut self) {
-        // Don't add blank lines in switch blocks
-        if self.in_switch_block() {
-            return;
-        }
         // Skip blank lines inside array literals
         if !self.brackets.is_empty() {
             return;
