@@ -259,6 +259,9 @@ impl<'a> SymbolResolver<'a> {
 
     fn report_unused_variables(&mut self, ctx: &ResolverContext) {
         for decl in &ctx.declarations {
+            if decl.name.starts_with('_') {
+                continue;
+            }
             if !ctx.references.contains(&decl.name) {
                 let severity = match decl.kind {
                     DeclarationKind::Parameter => DiagnosticSeverity::HINT,
