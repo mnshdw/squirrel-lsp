@@ -654,13 +654,13 @@ impl<'a> SymbolResolver<'a> {
 
         let name = self.node_text(node);
 
-        if BUILTINS.contains(name) {
+        // Check locals first as they shadow builtins and globals
+        if ctx.locals.contains(name) {
+            ctx.record_reference(name);
             return;
         }
 
-        // Important: check locals first as they shadow globals
-        if ctx.locals.contains(name) {
-            ctx.record_reference(name);
+        if BUILTINS.contains(name) {
             return;
         }
 
@@ -919,6 +919,18 @@ mod tests {
     }
 
     #[test]
+    fn test_local_shadowing_builtin() {
+        let code = r#"
+            function test() {
+                local type = "orc";
+                return type;
+            }
+        "#;
+        let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+        assert!(diagnostics.is_empty(), "Got: {:?}", diagnostics);
+    }
+
+    #[test]
     fn test_undeclared_variable() {
         let code = r#"
             function test() {
@@ -1051,6 +1063,23 @@ mod tests {
         assert!(unused[0].message.contains("'unused_param'"));
         // Parameters should be HINT, not WARNING
         assert_eq!(unused[0].severity, Some(DiagnosticSeverity::HINT));
+    }
+
+    #[test]
+    fn test_underscore_prefix_suppresses_unused_warning() {
+        let code = r#"
+            function test(_unused_param) {
+                local _unused_local = 1;
+                local used = 2;
+                return used;
+            }
+        "#;
+        let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
+        let unused: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.message.contains("Unused"))
+            .collect();
+        assert_eq!(unused.len(), 0);
     }
 
     #[test]
