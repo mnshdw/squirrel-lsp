@@ -245,7 +245,7 @@ impl Workspace {
                 file_path: file_path.to_path_buf(),
                 script_path: script_path.clone(),
                 name: inherit_call.class_name,
-                parent_path: Some(parent_path),
+                parent_path: Some(parent_path.to_string()),
                 parent: None, // Resolved later
                 children: Vec::new(),
                 members: extract_members_from_table(inherit_call.class_body, content),
@@ -288,14 +288,14 @@ impl Workspace {
                 // Normalize and resolve parent
                 let normalized_parent = normalize_script_path(&parent_path);
 
-                if self.contains(&normalized_parent) {
+                if self.contains(normalized_parent) {
                     // Update parent reference
                     if let Some(entry_mut) = self.files.get_mut(&script_path) {
-                        entry_mut.parent = Some(normalized_parent.clone());
+                        entry_mut.parent = Some(normalized_parent.to_string());
                     }
 
                     // Add child to parent
-                    if let Some(parent_mut) = self.get_mut(&normalized_parent)
+                    if let Some(parent_mut) = self.get_mut(normalized_parent)
                         && !parent_mut.children.contains(&script_path)
                     {
                         parent_mut.children.push(script_path.clone());
@@ -391,10 +391,8 @@ fn extract_script_path(file_path: &Path) -> String {
 }
 
 /// Normalize a script path (remove "scripts/" prefix and ".nut" suffix)
-fn normalize_script_path(path: &str) -> String {
-    path.trim_start_matches("scripts/")
-        .trim_end_matches(".nut")
-        .to_string()
+fn normalize_script_path(path: &str) -> &str {
+    path.trim_start_matches("scripts/").trim_end_matches(".nut")
 }
 
 /// Find a global table definition that matches the file name.
