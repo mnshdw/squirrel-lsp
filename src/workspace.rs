@@ -379,7 +379,8 @@ impl Workspace {
 /// Extract script path from a file path.
 /// E.g., "/path/to/scripts/statistics/statistics_manager.nut" -> "statistics/statistics_manager"
 fn extract_script_path(file_path: &Path) -> String {
-    let path_str = file_path.to_string_lossy();
+    // Normalize paths for Windows
+    let path_str = file_path.to_string_lossy().replace('\\', "/");
 
     if let Some(scripts_idx) = path_str.find("scripts/") {
         let after_scripts = &path_str[scripts_idx + 8..]; // len("scripts/") = 8
