@@ -194,6 +194,8 @@ struct Formatter<'a> {
     last_closed_paren_kind: Option<ParenKind>,
     // Track the paren_depth at which we started breaking logical operators
     breaking_logical_at_depth: Option<usize>,
+    // Track the paren_depth at which we started breaking concat operators
+    breaking_concat_at_depth: Option<usize>,
 }
 
 impl<'a> Formatter<'a> {
@@ -213,6 +215,7 @@ impl<'a> Formatter<'a> {
             ternaries: Vec::new(),
             last_closed_paren_kind: None,
             breaking_logical_at_depth: None,
+            breaking_concat_at_depth: None,
         }
     }
 
@@ -532,8 +535,9 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
         self.output.push(';');
 
-        // Reset logical operator breaking state (statement ended)
+        // Reset operator breaking state (statement ended)
         self.breaking_logical_at_depth = None;
+        self.breaking_concat_at_depth = None;
 
         // If we're in a multiline ternary, dedent back
         if !self.ternaries.is_empty() {
@@ -1047,21 +1051,11 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_operator_with_line_break(&mut self, token: &Token, is_logical_op: bool) {
-        // Mark that we're breaking logical operators at this depth
+        // Mark that we're breaking operators at this depth
         if is_logical_op && self.breaking_logical_at_depth.is_none() {
             self.breaking_logical_at_depth = Some(self.paren_depth);
-        }
-
-        // If we break inside an if/for/switch, remember it became multiline
-        if self.paren_depth > 0
-            && let Some(frame) = self.parens.last_mut()
-        {
-            match frame.kind {
-                ParenKind::If | ParenKind::For | ParenKind::Switch => {
-                    frame.multiline = true;
-                },
-                _ => {},
-            }
+        } else if !is_logical_op && self.breaking_concat_at_depth.is_none() {
+            self.breaking_concat_at_depth = Some(self.paren_depth);
         }
 
         self.push_newline();
