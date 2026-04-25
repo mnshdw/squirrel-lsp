@@ -135,6 +135,7 @@ struct ParenContext {
     kind: ParenKind,
     bracket_depth_at_open: usize,
     multiline: bool,
+    indented: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -621,26 +622,22 @@ impl<'a> Formatter<'a> {
             _ => ParenKind::Regular,
         };
 
-        // Determine if we should start multiline after this paren based on original layout.
-        // We preserve an existing newline immediately after '(' for both function calls
-        // and control-flow conditions (if/for/switch), excluding trivial closers.
-        // For function calls, also exclude cases where first arg is array/object (they manage their own formatting).
+        // Preserve a source newline after `(`, but not for trivial closers or
+        // for function calls whose first arg manages its own formatting.
         let next_breaks_line = remaining
             .first()
             .is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), ")" | "[" | "{"));
-        let should_multiline = match kind {
-            ParenKind::Regular => next_breaks_line,
-            ParenKind::If | ParenKind::For | ParenKind::Switch => next_breaks_line,
-            ParenKind::Function => false,
-        };
+        let should_multiline = next_breaks_line && !matches!(kind, ParenKind::Function);
+        let should_indent = should_multiline && matches!(kind, ParenKind::Regular);
 
         self.parens.push(ParenContext {
             kind,
             bracket_depth_at_open: self.bracket_depth,
             multiline: should_multiline,
+            indented: should_indent,
         });
 
-        if should_multiline {
+        if should_indent {
             self.indent_level += 1;
             self.push_newline();
         }
@@ -665,18 +662,29 @@ impl<'a> Formatter<'a> {
         let frame_kind = frame.as_ref().map(|f| f.kind);
         let is_if_header = frame_kind.is_some_and(|k| matches!(k, ParenKind::If));
         let was_multiline = frame.is_some_and(|f| f.multiline);
+        let was_indented = frame.is_some_and(|f| f.indented);
 
         // Track the paren kind for the next open brace (e.g., to detect switch blocks)
         self.last_closed_paren_kind = frame_kind;
 
-        if was_multiline {
-            // For multiline function calls, close paren on its own line based on prior indent
-            if matches!(frame_kind, Some(ParenKind::Regular)) {
-                self.indent_level = self.indent_level.saturating_sub(1);
-                if !self.output.ends_with('\n') {
-                    self.push_newline();
-                }
-            }
+        if was_indented {
+            self.indent_level = self.indent_level.saturating_sub(1);
+        }
+
+        // For multiline function calls, close paren goes on its own line.
+        if was_multiline
+            && matches!(frame_kind, Some(ParenKind::Regular))
+            && !self.output.ends_with('\n')
+        {
+            self.push_newline();
+        }
+
+        if matches!(
+            frame_kind,
+            Some(ParenKind::If | ParenKind::For | ParenKind::Switch)
+        ) {
+            self.breaking_logical_at_depth = None;
+            self.breaking_concat_at_depth = None;
         }
 
         self.ensure_indent();
@@ -957,8 +965,15 @@ impl<'a> Formatter<'a> {
         );
 
         // Logical operators can break anywhere when lines are too long
-        // Other binary operators only break at top level (paren_depth == 0)
-        let can_break = is_logical_op || self.paren_depth == 0;
+        // Other binary operators only break at top level (paren_depth == 0),
+        // except for string concat chains which are allowed to break at any depth.
+        let in_string_concat = token.text == "+"
+            && self.prev().is_some_and(|p| p.kind == TokenKind::String)
+            && remaining
+                .iter()
+                .find(|t| t.kind != TokenKind::Blankline && t.kind != TokenKind::Comment)
+                .is_some_and(|t| t.kind == TokenKind::String);
+        let can_break = is_logical_op || self.paren_depth == 0 || in_string_concat;
 
         if (is_logical_op || is_binary_op)
             && can_break
@@ -1003,18 +1018,14 @@ impl<'a> Formatter<'a> {
         let in_condition = self.is_in_condition();
         let at_condition_top_level = self.is_at_condition_top_level();
 
-        // If the condition is already multiline (either because we broke earlier by width
-        // or because the input had a newline after '('), force breaking before each top-level
-        // logical operator to keep one operand per line.
-        let should_break = if is_logical_op
-            && in_condition
-            && at_condition_top_level
-            && self.parens.last().is_some_and(|f| f.multiline)
-        {
-            true
-        } else if is_logical_op && self.breaking_logical_at_depth == Some(self.paren_depth) {
-            // We've already started breaking logical operators at this depth,
-            // continue breaking for consistency
+        let active_break_depth = if is_logical_op {
+            self.breaking_logical_at_depth
+        } else {
+            self.breaking_concat_at_depth
+        };
+
+        let should_break = if active_break_depth == Some(self.paren_depth) {
+            // Already breaking operators of this kind at this depth
             true
         } else if is_logical_op {
             let estimated_remaining = if in_condition {
@@ -1028,7 +1039,8 @@ impl<'a> Formatter<'a> {
             let cond_len = if in_condition { 3 } else { 0 };
             line_length + op_len + estimated_remaining + cond_len > self.options.max_width
         } else {
-            line_length + 1 + token.text.len() > self.options.max_width
+            let op_len = 1 + token.text.len() + 1;
+            line_length + op_len + Self::next_operand_len(remaining) > self.options.max_width
         };
 
         if !should_break {
@@ -1050,12 +1062,43 @@ impl<'a> Formatter<'a> {
         true
     }
 
+    /// Treats consecutive String tokens (open quote / body / close quote) as one operand.
+    fn next_operand_len(remaining: &[Token]) -> usize {
+        let mut len = 0;
+        let mut in_string = false;
+        for t in remaining {
+            if matches!(t.kind, TokenKind::Blankline | TokenKind::Comment) {
+                continue;
+            }
+            if t.kind == TokenKind::String {
+                len += t.text.len();
+                in_string = true;
+            } else {
+                if !in_string {
+                    len += t.text.len();
+                }
+                break;
+            }
+        }
+        len
+    }
+
     fn write_operator_with_line_break(&mut self, token: &Token, is_logical_op: bool) {
         // Mark that we're breaking operators at this depth
         if is_logical_op && self.breaking_logical_at_depth.is_none() {
             self.breaking_logical_at_depth = Some(self.paren_depth);
         } else if !is_logical_op && self.breaking_concat_at_depth.is_none() {
             self.breaking_concat_at_depth = Some(self.paren_depth);
+        }
+
+        // A line break inside an if/for/switch makes the content multiline
+        if let Some(frame) = self.parens.last_mut()
+            && matches!(
+                frame.kind,
+                ParenKind::If | ParenKind::For | ParenKind::Switch
+            )
+        {
+            frame.multiline = true;
         }
 
         self.push_newline();
