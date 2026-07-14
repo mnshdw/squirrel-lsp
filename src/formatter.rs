@@ -1596,6 +1596,8 @@ fn starts_statement(leaf: Node) -> bool {
 
         let starts_one = match parent.kind() {
             "script" | "block" | "case_statement" | "default_statement" => node.is_named(),
+            // A table's slots are separated by a ',' or (sadly) a newline
+            "table_slots" => node.is_named(),
             // 'class' and the class name also start here, but only members are statements
             "class_declaration" => node.kind() == "member_declaration",
             // The entries. The enum's own name matches too, but it shares the 'enum' line,
