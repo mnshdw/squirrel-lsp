@@ -133,26 +133,22 @@ fn test_invalid_method_name_in_hook() {
 }
 
 #[test]
-fn test_hook_type_suggestion_base_class() {
+fn test_hook_exact_class_on_class_with_descendants_is_not_flagged() {
     let workspace = create_test_workspace();
 
     let code = r#"
         ::mods_hookExactClass("entity/tactical/actor", function(o) {
-            // Using hookExactClass on actor which has children (human, etc.)
+            // 'actor' has children (human, etc.), but hooking only the exact class is a
+            // deliberate choice and must not be second-guessed.
         });
     "#;
 
     let diagnostics = analyze_hooks(code, &workspace).expect("Hook analysis should succeed");
 
-    let warnings: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| d.severity == Some(DiagnosticSeverity::WARNING))
-        .collect();
-
-    assert!(!warnings.is_empty(), "Should have warning about hook type");
     assert!(
-        warnings[0].message.contains("hookBaseClass"),
-        "Should suggest hookBaseClass"
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
 
@@ -250,7 +246,6 @@ fn test_multiple_hooks_different_types() {
 
     let diagnostics = analyze_hooks(code, &workspace).expect("Hook analysis should succeed");
 
-    // Should have multiple warnings but no errors
     let errors: Vec<_> = diagnostics
         .iter()
         .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
@@ -261,7 +256,9 @@ fn test_multiple_hooks_different_types() {
         .collect();
 
     assert_eq!(errors.len(), 0, "Should have no errors");
-    assert!(warnings.len() >= 2, "Should have multiple warnings");
+
+    assert_eq!(warnings.len(), 1, "got: {:?}", warnings);
+    assert!(warnings[0].message.contains("no descendants"));
 }
 
 /// Test case for semantic/029_function_declared_in_parent.nut

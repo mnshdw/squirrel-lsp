@@ -355,46 +355,22 @@ fn validate_hook_type(hook: &HookCall, workspace: &Workspace, text: &str) -> Vec
         None => return diagnostics,
     };
 
-    let children = workspace.children_of(&hook.target_path);
-    let has_children = !children.is_empty();
-    let children_count = children.len();
-
-    match hook.hook_type {
-        HookType::Exact if has_children => {
-            let range = first_line_range(hook.node, text);
-
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::WARNING),
-                source: Some("squirrel-bb-hook".to_string()),
-                message: format!(
-                    "Using 'hookExactClass' on '{}' which has {} descendant(s). Consider 'hookBaseClass' to affect all descendants.",
-                    target_entry.name, children_count
-                ),
-                code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                    "hook-type-suggestion".to_string(),
-                )),
-                ..Diagnostic::default()
-            });
-        },
-        HookType::Descendants if !has_children => {
-            let range = first_line_range(hook.node, text);
-
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::WARNING),
-                source: Some("squirrel-bb-hook".to_string()),
-                message: format!(
-                    "Using 'hookDescendants' on '{}' which has no descendants. Consider 'hookExactClass'.",
-                    target_entry.name
-                ),
-                code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                    "hook-type-no-descendants".to_string(),
-                )),
-                ..Diagnostic::default()
-            });
-        },
-        _ => {},
+    if hook.hook_type == HookType::Descendants
+        && workspace.children_of(&hook.target_path).is_empty()
+    {
+        diagnostics.push(Diagnostic {
+            range: first_line_range(hook.node, text),
+            severity: Some(DiagnosticSeverity::WARNING),
+            source: Some("squirrel-bb-hook".to_string()),
+            message: format!(
+                "Using 'hookDescendants' on '{}' which has no descendants. Consider 'hookExactClass'.",
+                target_entry.name
+            ),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "hook-type-no-descendants".to_string(),
+            )),
+            ..Diagnostic::default()
+        });
     }
 
     diagnostics
@@ -699,10 +675,26 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_type_suggestion() {
+    fn test_hook_exact_class_on_class_with_descendants_is_not_flagged() {
         let workspace = create_test_workspace();
         let code = r#"
             ::mods_hookExactClass("entity/tactical/actor", function(o) {});
+        "#;
+
+        let diagnostics = analyze_hooks(code, &workspace).unwrap();
+
+        assert!(
+            diagnostics.is_empty(),
+            "expected no diagnostics, got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_hook_descendants_with_no_descendants_is_still_flagged() {
+        let workspace = create_test_workspace();
+        let code = r#"
+            ::mods_hookDescendants("entity/tactical/human", function(o) {});
         "#;
 
         let diagnostics = analyze_hooks(code, &workspace).unwrap();
@@ -711,8 +703,8 @@ mod tests {
             .filter(|d| d.severity == Some(DiagnosticSeverity::WARNING))
             .collect();
 
-        assert!(!warnings.is_empty());
-        assert!(warnings[0].message.contains("hookBaseClass"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("no descendants"));
     }
 
     #[test]
