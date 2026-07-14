@@ -41,6 +41,64 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "throw",
         "type",
         "typeof",
+        // Base library constants
+        "_charsize_",
+        "_floatsize_",
+        "_intsize_",
+        "_version_",
+        "_versionnumber_",
+        // Standard library: math
+        "abs",
+        "acos",
+        "asin",
+        "atan",
+        "atan2",
+        "ceil",
+        "cos",
+        "exp",
+        "fabs",
+        "floor",
+        "log",
+        "log10",
+        "pow",
+        "rand",
+        "sin",
+        "sqrt",
+        "srand",
+        "tan",
+        "PI",
+        "RAND_MAX",
+        // Standard library: string
+        "endswith",
+        "escape",
+        "lstrip",
+        "rstrip",
+        "split",
+        "startswith",
+        "strip",
+        // Standard library: system
+        "clock",
+        "date",
+        "getenv",
+        "remove",
+        "rename",
+        "system",
+        "time",
+        // Standard library: io
+        "dofile",
+        "file",
+        "loadfile",
+        "stderr",
+        "stdin",
+        "stdout",
+        "writeclosuretofile",
+        // Standard library: blob
+        "blob",
+        "castf2i",
+        "casti2f",
+        "swap2",
+        "swap4",
+        "swapfloat",
         // Special keywords
         "this",
         "Math",
@@ -70,6 +128,7 @@ struct ResolverContext {
     declarations: Vec<Declaration>,
     references: HashSet<String>,
     has_parent: bool,
+    has_inherited_members: bool,
 }
 
 impl ResolverContext {
@@ -79,6 +138,7 @@ impl ResolverContext {
             declarations: Vec::new(),
             references: HashSet::new(),
             has_parent: false,
+            has_inherited_members: false,
         }
     }
 
@@ -105,6 +165,7 @@ impl ResolverContext {
             declarations: Vec::new(),
             references: HashSet::new(),
             has_parent: self.has_parent,
+            has_inherited_members: self.has_inherited_members,
         }
     }
 }
@@ -261,6 +322,14 @@ impl<'a> SymbolResolver<'a> {
                 self.analyze_declaration(node, ctx);
                 return;
             },
+            "enum_declaration" => {
+                // Fall through to the walk below so that entry values are still
+                // resolved; the entries themselves are declarations.
+                if let Some(ident) = self.find_first_identifier(node) {
+                    let name = self.node_text(ident).to_string();
+                    ctx.locals.insert(name);
+                }
+            },
             "identifier" => {
                 self.check_identifier(node, ctx);
             },
@@ -393,10 +462,10 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    fn analyze_class(&mut self, node: Node, parent_ctx: &ResolverContext) {
+    fn analyze_class(&mut self, node: Node, parent_ctx: &mut ResolverContext) {
         let members = self.extract_class_member_names(node);
 
-        let mut ctx = parent_ctx.clone();
+        let mut ctx = parent_ctx.child();
         ctx.has_parent = false;
         for member in &members {
             ctx.locals.insert(member.clone());
@@ -405,50 +474,64 @@ impl<'a> SymbolResolver<'a> {
         for child in node.children(&mut node.walk()) {
             if child.kind() == "extends" {
                 ctx.has_parent = true;
+                ctx.has_inherited_members = true;
             }
         }
 
         for child in node.children(&mut node.walk()) {
-            if child.kind() == "class_body" {
-                self.analyze_class_body(child, &ctx);
+            if child.kind() == "member_declaration" {
+                self.analyze_member_declaration(child, &mut ctx);
             }
         }
+
+        // Methods close over the enclosing scope, so a local used in a method
+        // body counts as used where it was declared.
+        parent_ctx.merge_references(&ctx);
     }
 
-    fn analyze_class_body(&mut self, node: Node, ctx: &ResolverContext) {
-        for child in node.children(&mut node.walk()) {
-            if child.kind() == "class_member" {
-                self.analyze_class_member(child, ctx);
-            }
+    /// A member is one of:
+    ///   [static] name = value[;]      the name is a declaration, the value is code
+    ///   [expr] = value[;]             both the key and the value are code
+    ///   function name(...) { ... }
+    ///   constructor(...) { ... }      parameters and body hang off the member itself
+    fn analyze_member_declaration(&mut self, node: Node, ctx: &mut ResolverContext) {
+        if self.is_constructor(node) {
+            self.analyze_function(node, ctx);
+            return;
         }
-    }
 
-    fn analyze_class_member(&mut self, node: Node, ctx: &ResolverContext) {
-        let mut ctx = ctx.clone();
+        let mut in_key = false;
+        let mut saw_equals = false;
         for child in node.children(&mut node.walk()) {
             match child.kind() {
-                "identifier" | "=" | "static" => {},
+                "[" => in_key = true,
+                "]" => in_key = false,
+                "=" => saw_equals = true,
+                "static" | ";" | "attribute_declaration" => {},
+                // The slot name, as opposed to a computed [key] which is an expression
+                "identifier" if !saw_equals && !in_key => {},
                 "function_declaration" => {
-                    self.analyze_function(child, &mut ctx);
+                    self.analyze_function(child, ctx);
                 },
                 _ => {
-                    self.analyze_node(child, &mut ctx);
+                    self.analyze_node(child, ctx);
                 },
             }
         }
+    }
+
+    fn is_constructor(&self, node: Node) -> bool {
+        node.children(&mut node.walk())
+            .any(|child| child.kind() == "constructor")
     }
 
     fn extract_class_member_names(&self, node: Node) -> HashSet<String> {
         let mut names = HashSet::new();
         for child in node.children(&mut node.walk()) {
-            if child.kind() == "class_body" {
-                for member in child.children(&mut child.walk()) {
-                    if member.kind() == "class_member"
-                        && let Some(name) = self.extract_class_member_name(member)
-                    {
-                        names.insert(name);
-                    }
-                }
+            if child.kind() == "member_declaration"
+                && let Some(name) = self.extract_class_member_name(child)
+            {
+                names.insert(name);
             }
         }
         names
@@ -457,6 +540,9 @@ impl<'a> SymbolResolver<'a> {
     fn extract_class_member_name(&self, node: Node) -> Option<String> {
         for child in node.children(&mut node.walk()) {
             match child.kind() {
+                // A computed key ([expr] = value) does not name a member
+                "[" => return None,
+                "constructor" => return Some("constructor".to_string()),
                 "identifier" => {
                     return Some(self.node_text(child).to_string());
                 },
@@ -685,7 +771,16 @@ impl<'a> SymbolResolver<'a> {
         }
 
         // Inherited methods might come from parent class
-        if ctx.has_parent && self.is_function_call(node) {
+        if ctx.has_parent && self.is_function_call(node) && !ctx.has_inherited_members {
+            return;
+        }
+
+        // A bare name in a derived class may be a slot it inherited from a base whose members
+        // we cannot see, so it is not reported. It is still counted as unresolved: the names
+        // the environment binds into the root table are, in a class-based codebase, used mostly
+        // from inside class bodies, and it is that count which tells them apart from a typo.
+        if ctx.has_inherited_members {
+            self.unresolved.push(name.to_string());
             return;
         }
 
@@ -708,6 +803,12 @@ impl<'a> SymbolResolver<'a> {
         };
         let parent_kind = parent.kind();
 
+        // Every identifier directly under an enum is a declaration: the enum name
+        // followed by its entries.
+        if parent_kind == "enum_declaration" {
+            return true;
+        }
+
         if matches!(
             parent_kind,
             "local_declaration"
@@ -717,7 +818,6 @@ impl<'a> SymbolResolver<'a> {
                 | "class_declaration"
                 | "parameter"
                 | "table_slot"
-                | "enum_declaration"
         ) && let Some(first) = self.find_first_identifier(parent)
             && first.id() == node.id()
         {

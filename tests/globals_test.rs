@@ -146,3 +146,54 @@ fn test_battle_brothers_partial_paths_and_mod_overlay() {
 
     assert!(workspace.globals().contains("actor"));
 }
+
+/// The environment binds its own names into the root table, and in a class-based codebase
+/// most of them are used from inside class bodies. Those references are not reported (a
+/// name in a derived class may be an inherited slot), but they still have to count towards
+/// the inference: a native used once outside a class and once inside one would otherwise
+/// stay below the threshold and be reported at the reference outside.
+#[test]
+fn test_native_used_inside_a_class_counts_towards_inference() {
+    let config = r#"
+        function setup() {
+            local img = Image("res://images/player.png");
+            return img.width;
+        }
+    "#;
+    let tent = r#"
+        class Tent extends Entity {
+            constructor() {
+                down1 = Image("res://images/objects/tent.png");
+            }
+        }
+    "#;
+
+    let workspace = index("/ws", &[("/ws/config.nut", config), ("/ws/tent.nut", tent)]);
+
+    assert!(
+        workspace.known_globals().contains("Image"),
+        "Image is used twice, so it should be inferred as a name from the environment"
+    );
+    assert!(
+        undeclared(&workspace, "/ws/config.nut", config).is_empty(),
+        "got: {:?}",
+        undeclared(&workspace, "/ws/config.nut", config)
+    );
+}
+
+/// A name used only once is still assumed to be a typo, including inside a class.
+#[test]
+fn test_single_use_outside_a_class_is_still_reported() {
+    let config = r#"
+        function setup() {
+            return Imag("res://images/player.png");
+        }
+    "#;
+
+    let workspace = index("/ws", &[("/ws/config.nut", config)]);
+
+    assert_eq!(
+        undeclared(&workspace, "/ws/config.nut", config),
+        vec!["Undeclared variable 'Imag'".to_string()]
+    );
+}

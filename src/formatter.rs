@@ -68,6 +68,7 @@ struct Token {
     kind: TokenKind,
     preceded_by_newline: bool,
     preceding_whitespace: String,
+    starts_statement: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +222,9 @@ impl<'a> Formatter<'a> {
     }
 
     fn finish(mut self) -> String {
+        // A single-statement block that runs to the end of the file still has to be closed
+        self.close_synthetic_blocks(None);
+
         if self.options.trim_trailing_whitespace {
             trim_trailing_whitespace(&mut self.output);
         }
@@ -232,8 +236,31 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_token(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
+        // A statement the source started on its own line is separated by that newline, which
+        // may be the only thing separating it from the previous one. Keep it. Statements the
+        // source wrote on one line ('if (x) break') are left to the rules below.
+        if token.starts_statement
+            && token.preceded_by_newline
+            && !self.output.is_empty()
+            && !matches!(token.kind, TokenKind::Comment | TokenKind::Blankline)
+        {
+            self.close_synthetic_blocks(Some(token));
+            self.push_newline();
+        }
+
+        // A blank line after the statement of a single-statement block belongs after the
+        // block, not inside it. Nothing written since the '{' means the statement is still
+        // to come, and the block stays open.
+        if token.kind == TokenKind::Blankline
+            && self.braces.last().is_some_and(|b| b.is_synthetic)
+            && !self.output.trim_end().ends_with('{')
+        {
+            self.close_synthetic_blocks(None);
+        }
+
         // Handle case/default in switch blocks before other processing
         if self.in_switch_block() && matches!(token.text.as_str(), "case" | "default") {
+            self.close_synthetic_blocks(Some(token));
             self.write_case_label(token);
             return;
         }
@@ -241,7 +268,11 @@ impl<'a> Formatter<'a> {
         let is_symbol = token.kind == TokenKind::Symbol;
         match token.text.as_str() {
             "{" if is_symbol => self.write_open_brace(token, next),
-            "}" if is_symbol => self.write_close_brace(token, next),
+            "}" if is_symbol => {
+                // The enclosing block ends, so any single-statement block inside it ends too
+                self.close_synthetic_blocks(Some(token));
+                self.write_close_brace(token, next);
+            },
             ";" if is_symbol => self.write_semicolon(token, next),
             "," if is_symbol => self.write_comma(token, next),
             "(" if is_symbol => self.write_open_paren(token, remaining),
@@ -561,12 +592,22 @@ impl<'a> Formatter<'a> {
         }
 
         // If we auto-opened a block for a single-statement if/else, close it now
-        if self.braces.last().is_some_and(|b| b.is_synthetic) {
+        self.close_synthetic_blocks(next);
+    }
+
+    /// Close the blocks auto-opened for a single-statement if/else.
+    ///
+    /// The statement they wrap ends at a ';' but also at the newline before whatever comes
+    /// next, so this runs at every statement boundary. A block left open would swallow the
+    /// rest of the file.
+    fn close_synthetic_blocks(&mut self, next: Option<&Token>) {
+        while self.braces.last().is_some_and(|b| b.is_synthetic) {
             let synthetic = Token {
                 text: "}".to_string(),
                 kind: TokenKind::Symbol,
                 preceded_by_newline: false,
                 preceding_whitespace: String::new(),
+                starts_statement: false,
             };
             self.write_close_brace(&synthetic, next);
         }
@@ -1203,6 +1244,9 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_else(&mut self, token: &Token, remaining: &[Token]) {
+        // The if body ends here, even when no ';' closed it
+        self.close_synthetic_blocks(Some(token));
+
         self.prepare_token(token);
         self.output.push_str(&token.text);
 
@@ -1469,8 +1513,11 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
 
     loop {
         let node = cursor.node();
+        // A char literal's contents are not nodes of their own: only its two quotes are. It
+        // has to be taken whole, or the character between them is dropped.
+        let is_atomic = is_atomic_literal_kind(node.kind());
 
-        if !visited_children && node.child_count() == 0 {
+        if !visited_children && (node.child_count() == 0 || is_atomic) {
             let start = node.start_byte();
             let mut preceded_by_newline = false;
             let mut preceding_whitespace = String::new();
@@ -1487,6 +1534,7 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
                         kind: TokenKind::Blankline,
                         preceded_by_newline: true,
                         preceding_whitespace: String::new(),
+                        starts_statement: false,
                     });
                 }
             }
@@ -1509,12 +1557,13 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
                     text,
                     preceded_by_newline,
                     preceding_whitespace,
+                    starts_statement: starts_statement(node),
                 });
             }
             prev_end = node.end_byte();
         }
 
-        if !visited_children && cursor.goto_first_child() {
+        if !visited_children && !is_atomic && cursor.goto_first_child() {
             visited_children = false;
             continue;
         }
@@ -1532,6 +1581,34 @@ fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
     }
 
     Ok(tokens)
+}
+
+/// Whether `leaf` is the first token of a statement, of a class member or of an enum entry.
+fn starts_statement(leaf: Node) -> bool {
+    let mut node = leaf;
+    loop {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        if node.start_byte() != leaf.start_byte() {
+            return false;
+        }
+
+        let starts_one = match parent.kind() {
+            "script" | "block" | "case_statement" | "default_statement" => node.is_named(),
+            // 'class' and the class name also start here, but only members are statements
+            "class_declaration" => node.kind() == "member_declaration",
+            // The entries. The enum's own name matches too, but it shares the 'enum' line,
+            // so no line break is kept for it.
+            "enum_declaration" => node.kind() == "identifier",
+            _ => false,
+        };
+        if starts_one {
+            return true;
+        }
+
+        node = parent;
+    }
 }
 
 fn classify_token(node: &Node) -> TokenKind {
@@ -1556,6 +1633,11 @@ fn classify_token(node: &Node) -> TokenKind {
 
 fn is_string_node_kind(kind: &str) -> bool {
     matches!(kind, "string" | "string_literal" | "raw_string")
+}
+
+/// A literal that has to be written out as it was written in the source.
+fn is_atomic_literal_kind(kind: &str) -> bool {
+    kind == "char"
 }
 
 fn is_keyword_kind(kind: &str) -> bool {

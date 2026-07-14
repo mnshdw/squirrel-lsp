@@ -108,6 +108,90 @@ this.skill <- {
     );
 }
 
+/// A local declared next to a class and used inside one of its methods is used:
+/// methods close over the enclosing scope.
+#[test]
+fn test_local_used_in_class_method_not_unused() {
+    let code = r#"
+local sleepSE = Audio("res://sounds/sleep.wav");
+
+class Tent extends Entity {
+    function use(_entity) {
+        sleepSE.play();
+        return true;
+    }
+}
+"#;
+
+    let diagnostics =
+        compute_symbol_diagnostics("test.nut", code).expect("analysis should succeed");
+
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message == "Unused variable 'sleepSE'"),
+        "Should not report the captured local as unused, got: {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// A constructor's parameters and body hang off the member declaration itself rather than
+/// off a function_declaration, so they need their own handling to be analyzed at all.
+#[test]
+fn test_constructor_body_is_analyzed() {
+    let code = r#"
+class Item {
+    price = 0;
+
+    constructor(_price) {
+        price = _price;
+        this.price = missingThing;
+    }
+}
+"#;
+
+    let diagnostics =
+        compute_symbol_diagnostics("test.nut", code).expect("analysis should succeed");
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message == "Undeclared variable 'missingThing'"),
+        "constructor body should be analyzed, got: {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(
+        !diagnostics.iter().any(|d| d.message.contains("'_price'")),
+        "constructor parameters should be in scope, got: {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// A local that no class member reads is still reported.
+#[test]
+fn test_unused_local_next_to_class_still_reported() {
+    let code = r#"
+local sleepSE = Audio("res://sounds/sleep.wav");
+
+class Tent extends Entity {
+    function use(entity) {
+        return true;
+    }
+}
+"#;
+
+    let diagnostics =
+        compute_symbol_diagnostics("test.nut", code).expect("analysis should succeed");
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message == "Unused variable 'sleepSE'"),
+        "Should report the unread local as unused, got: {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn test_variable_used_in_table_literal_value() {
     let code = r#"
