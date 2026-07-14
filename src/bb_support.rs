@@ -355,8 +355,9 @@ fn validate_hook_type(hook: &HookCall, workspace: &Workspace, text: &str) -> Vec
         None => return diagnostics,
     };
 
-    let has_children = !target_entry.children.is_empty();
-    let children_count = target_entry.children.len();
+    let children = workspace.children_of(&hook.target_path);
+    let has_children = !children.is_empty();
+    let children_count = children.len();
 
     match hook.hook_type {
         HookType::Exact if has_children => {
@@ -438,12 +439,7 @@ fn validate_parent_path(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    let lookup_path = inherit
-        .parent_path
-        .strip_prefix("scripts/")
-        .unwrap_or(&inherit.parent_path);
-
-    if workspace.get(lookup_path).is_none() {
+    if !workspace.contains(&inherit.parent_path) {
         let range = Range::new(
             helpers::position_at(text, inherit.parent_path_node.start_byte()),
             helpers::position_at(text, inherit.parent_path_node.end_byte()),
@@ -480,13 +476,8 @@ fn check_circular_inheritance(
     let mut diagnostics = Vec::new();
     let class_name = &inherit.class_name;
 
-    let lookup_path = inherit
-        .parent_path
-        .strip_prefix("scripts/")
-        .unwrap_or(&inherit.parent_path);
-
-    if let Some(parent_entry) = workspace.get(lookup_path) {
-        let ancestors = workspace.get_ancestors(lookup_path);
+    if let Some(parent_entry) = workspace.get(&inherit.parent_path) {
+        let ancestors = workspace.get_ancestors(&parent_entry.script_path);
 
         if parent_entry.name == *class_name {
             let range = Range::new(

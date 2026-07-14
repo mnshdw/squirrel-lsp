@@ -18,7 +18,7 @@ use std::sync::Arc;
 use bb_support::{analyze_hooks, analyze_inheritance};
 use code_actions::generate_code_actions;
 use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
-use symbol_resolver::compute_symbol_diagnostics_with_globals;
+use symbol_resolver::{collect_unresolved_identifiers, compute_symbol_diagnostics_with_globals};
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
@@ -78,7 +78,7 @@ impl Backend {
 
     /// Index all .nut files in the workspace
     async fn index_workspace(&self) {
-        let folders = self.workspace_folders.read().await;
+        let folders = self.workspace_folders.read().await.clone();
         if folders.is_empty() {
             self.client
                 .log_message(MessageType::INFO, "No workspace folders to index")
@@ -87,7 +87,7 @@ impl Backend {
         }
 
         let mut all_files = Vec::new();
-        for folder in folders.iter() {
+        for folder in &folders {
             all_files.extend(Self::find_nut_files(folder));
         }
 
@@ -102,9 +102,12 @@ impl Backend {
             .await;
 
         let mut workspace = self.workspace.write().await;
+        *workspace = Workspace::with_folders(folders);
+
         let mut indexed_count = 0;
         let mut error_count = 0;
 
+        // Definitions: class, table and root-table slots in the workspace
         for file_path in &all_files {
             if let Ok(content) = std::fs::read_to_string(file_path) {
                 if let Err(e) = workspace.index_file(file_path, &content) {
@@ -127,6 +130,37 @@ impl Backend {
         // Build inheritance relationships after all files are indexed
         workspace.build_inheritance_graph();
 
+        // References that the definitions pass could not account for, because it needs every
+        // definition to be known already.
+        for file_path in &all_files {
+            let Ok(content) = std::fs::read_to_string(file_path) else {
+                continue;
+            };
+
+            let unresolved = collect_unresolved_identifiers(
+                &file_path.to_string_lossy(),
+                &content,
+                workspace.globals(),
+            )
+            .unwrap_or_default();
+
+            workspace.set_unresolved(file_path, &unresolved);
+        }
+
+        // Whatever is left over and used more than once is the env API, not a typo (hopefully).
+        workspace.infer_host_globals();
+
+        let inferred = workspace.known_globals().len() - workspace.globals().len();
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "{} globals defined in the workspace, {inferred} more inferred",
+                    workspace.globals().len()
+                ),
+            )
+            .await;
+
         self.client
             .log_message(
                 MessageType::INFO,
@@ -139,6 +173,21 @@ impl Backend {
                 ),
             )
             .await;
+    }
+
+    /// Re-index a single file after an edit, keeping the inferred host globals current.
+    async fn reindex_file(&self, path: &Path, text: &str) {
+        let mut workspace = self.workspace.write().await;
+
+        let _ = workspace.index_file(path, text);
+        workspace.build_inheritance_graph();
+
+        let unresolved =
+            collect_unresolved_identifiers(&path.to_string_lossy(), text, workspace.globals())
+                .unwrap_or_default();
+        workspace.set_unresolved(path, &unresolved);
+
+        workspace.infer_host_globals();
     }
 
     async fn get_document(&self, uri: &Url) -> Option<String> {
@@ -319,9 +368,7 @@ impl LanguageServer for Backend {
 
         // Update workspace index for this file
         if let Ok(path) = uri.to_file_path() {
-            let mut workspace = self.workspace.write().await;
-            let _ = workspace.index_file(&path, &text);
-            workspace.build_inheritance_graph();
+            self.reindex_file(&path, &text).await;
         }
 
         self.publish_syntax_diagnostics(uri, &text).await;
@@ -339,9 +386,7 @@ impl LanguageServer for Backend {
 
             // Update workspace index for this file
             if let Ok(path) = uri.to_file_path() {
-                let mut workspace = self.workspace.write().await;
-                let _ = workspace.index_file(&path, &text);
-                workspace.build_inheritance_graph();
+                self.reindex_file(&path, &text).await;
             }
 
             self.publish_syntax_diagnostics(uri, &text).await;
@@ -502,7 +547,7 @@ impl Backend {
             .unwrap_or_else(|_| uri.path().to_string());
 
         // Collect semantic diagnostics using symbol resolver
-        match compute_symbol_diagnostics_with_globals(&file_path, text, workspace.globals()) {
+        match compute_symbol_diagnostics_with_globals(&file_path, text, workspace.known_globals()) {
             Ok(semantic_diags) => {
                 diags.extend(semantic_diags);
             },

@@ -153,9 +153,7 @@ pub fn find_definition(
 
     match symbol {
         SymbolAtPosition::InheritParentPath(path) => {
-            let normalized = path.trim_start_matches("scripts/").trim_end_matches(".nut");
-
-            if let Some(entry) = workspace.get(normalized) {
+            if let Some(entry) = workspace.get(&path) {
                 return Some(DefinitionResult {
                     file_path: entry.file_path.clone(),
                     line: 0,
@@ -164,7 +162,7 @@ pub fn find_definition(
             }
         },
         SymbolAtPosition::MethodCall(method_name) | SymbolAtPosition::Identifier(method_name) => {
-            let script_path = extract_script_path(current_file);
+            let script_path = workspace.script_path_for(current_file);
 
             if !script_path.is_empty()
                 && let Some((file_path, line, column)) =
@@ -192,17 +190,6 @@ pub fn find_definition(
     }
 
     None
-}
-
-fn extract_script_path(file_path: &Path) -> String {
-    let path_str = file_path.to_string_lossy();
-
-    if let Some(scripts_idx) = path_str.find("scripts/") {
-        let after_scripts = &path_str[scripts_idx + 8..];
-        return after_scripts.trim_end_matches(".nut").to_string();
-    }
-
-    String::new()
 }
 
 pub fn definition_to_location(result: DefinitionResult) -> Option<Location> {

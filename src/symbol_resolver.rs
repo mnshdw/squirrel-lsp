@@ -11,7 +11,7 @@ use tree_sitter::Node;
 
 use crate::errors::AnalysisError;
 use crate::helpers;
-use crate::symbol_extractor::extract_file_symbols;
+use crate::symbol_extractor::extract_file_symbols_from_root;
 use crate::symbols::FileSymbols;
 
 static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -110,41 +110,57 @@ impl ResolverContext {
 }
 
 pub struct SymbolResolver<'a> {
+    file_path: &'a str,
     text: &'a str,
     file_symbols: FileSymbols,
     known_globals: Option<&'a HashSet<String>>,
+    unresolved: Vec<String>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl<'a> SymbolResolver<'a> {
     #[allow(dead_code)]
-    pub fn new(file_path: &str, text: &'a str) -> Result<Self, AnalysisError> {
-        let file_symbols = extract_file_symbols(file_path, text)?;
+    pub fn new(file_path: &'a str, text: &'a str) -> Result<Self, AnalysisError> {
         Ok(Self {
+            file_path,
             text,
-            file_symbols,
+            file_symbols: FileSymbols::default(),
             known_globals: None,
+            unresolved: Vec::new(),
             diagnostics: Vec::new(),
         })
     }
 
     pub fn with_globals(
-        file_path: &str,
+        file_path: &'a str,
         text: &'a str,
         globals: &'a HashSet<String>,
     ) -> Result<Self, AnalysisError> {
-        let file_symbols = extract_file_symbols(file_path, text)?;
         Ok(Self {
+            file_path,
             text,
-            file_symbols,
+            file_symbols: FileSymbols::default(),
             known_globals: Some(globals),
+            unresolved: Vec::new(),
             diagnostics: Vec::new(),
         })
     }
 
-    pub fn analyze(mut self) -> Result<Vec<Diagnostic>, AnalysisError> {
+    pub fn analyze(self) -> Result<Vec<Diagnostic>, AnalysisError> {
+        Ok(self.run()?.diagnostics)
+    }
+
+    /// The identifiers this file references that nothing declares.
+    pub fn analyze_unresolved(self) -> Result<Vec<String>, AnalysisError> {
+        Ok(self.run()?.unresolved)
+    }
+
+    fn run(mut self) -> Result<Self, AnalysisError> {
+        // Parse once and use the same tree for both symbol extraction and the walk.
         let tree = helpers::parse_squirrel(self.text)?;
         let root = tree.root_node();
+
+        self.file_symbols = extract_file_symbols_from_root(self.file_path, self.text, root);
 
         let mut ctx = ResolverContext::new();
         for name in self.file_symbols.symbols.keys() {
@@ -154,7 +170,7 @@ impl<'a> SymbolResolver<'a> {
         self.analyze_script(root, &mut ctx);
         self.report_unused_variables(&ctx);
 
-        Ok(self.diagnostics)
+        Ok(self)
     }
 
     fn analyze_script(&mut self, node: Node, ctx: &mut ResolverContext) {
@@ -673,6 +689,8 @@ impl<'a> SymbolResolver<'a> {
             return;
         }
 
+        self.unresolved.push(name.to_string());
+
         let start = self.position_at(node.start_byte());
         let end = self.position_at(node.end_byte());
         self.diagnostics.push(Diagnostic {
@@ -875,7 +893,7 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
-    fn node_text(&self, node: Node) -> &str {
+    fn node_text(&self, node: Node) -> &'a str {
         node.utf8_text(self.text.as_bytes()).unwrap_or("")
     }
 
@@ -900,6 +918,16 @@ pub fn compute_symbol_diagnostics_with_globals(
 ) -> Result<Vec<Diagnostic>, AnalysisError> {
     let resolver = SymbolResolver::with_globals(file_path, text, globals)?;
     resolver.analyze()
+}
+
+/// The identifiers `text` references that are neither local, nor built in, nor present in `globals`.
+pub fn collect_unresolved_identifiers(
+    file_path: &str,
+    text: &str,
+    globals: &HashSet<String>,
+) -> Result<Vec<String>, AnalysisError> {
+    let resolver = SymbolResolver::with_globals(file_path, text, globals)?;
+    resolver.analyze_unresolved()
 }
 
 #[cfg(test)]

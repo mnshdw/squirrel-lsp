@@ -12,6 +12,11 @@ use crate::bb_support::{find_inherit_calls, get_node_text};
 use crate::errors::AnalysisError;
 use crate::helpers;
 
+/// An identifier defined nowhere in the workspace is assumed to be declared by the host env
+/// once it is referenced at least this many times. A typo is written once (usually), but a binding
+/// like like `require` or `Const` gets used many times.
+const HOST_GLOBAL_MIN_REFERENCES: usize = 2;
+
 /// Information about a class member (method or field)
 #[derive(Debug, Clone)]
 pub struct MemberInfo {
@@ -53,14 +58,24 @@ pub struct FileEntry {
 
 /// The workspace indexed by script path.
 ///
-/// Script paths are relative to `scripts/` and without the `.nut` extension.
-/// E.g., "statistics/statistics_manager" for `scripts/statistics/statistics_manager.nut`
+/// Script paths are relative to the workspace folder and without the `.nut` extension.
+/// Eg. `Legends-public/scripts/statistics/statistics_manager`.
 #[derive(Debug, Default)]
 pub struct Workspace {
     /// Script path -> file entry
     files: HashMap<String, FileEntry>,
+    /// Trailing path suffix -> file keys having that suffix
+    suffix_index: HashMap<String, Vec<String>>,
     /// Global identifiers defined across all files
     globals: HashSet<String>,
+    /// File key -> identifiers that file references but nothing defines
+    unresolved: HashMap<String, HashMap<String, usize>>,
+    /// Identifier -> how many times the whole workspace references it unresolved
+    unresolved_totals: HashMap<String, usize>,
+    /// `globals`, plus the bindings inferred from `unresolved_totals`
+    known_globals: HashSet<String>,
+    /// Workspace folders, used to make file paths relative before keying them
+    folders: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -68,33 +83,40 @@ impl Workspace {
         Self::default()
     }
 
-    /// Get a file entry by script path
-    pub fn get(&self, script_path: &str) -> Option<&FileEntry> {
-        // Try exact match first
-        if let Some(entry) = self.files.get(script_path) {
-            return Some(entry);
+    /// Build a workspace whose file keys are relative to `folders`.
+    pub fn with_folders(folders: Vec<PathBuf>) -> Self {
+        Self {
+            folders,
+            ..Self::default()
         }
-
-        // Try with/without "scripts/" prefix
-        let normalized = script_path
-            .trim_start_matches("scripts/")
-            .trim_end_matches(".nut");
-
-        self.files.get(normalized)
     }
 
-    /// Get a mutable file entry by script path
-    fn get_mut(&mut self, script_path: &str) -> Option<&mut FileEntry> {
-        let normalized = script_path
-            .trim_start_matches("scripts/")
-            .trim_end_matches(".nut");
+    /// Resolve a path as written in source to every file it could refer to.
+    pub fn resolve_all(&self, script_path: &str) -> Vec<&FileEntry> {
+        let key = suffix_key(script_path);
 
-        self.files.get_mut(normalized)
+        self.suffix_index
+            .get(&key)
+            .map(|keys| keys.iter().filter_map(|k| self.files.get(k)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get a file entry by the path used to refer to it in source.
+    ///
+    /// When several files match (the same script provided by several mods), the shallowest one wins.
+    pub fn get(&self, script_path: &str) -> Option<&FileEntry> {
+        self.resolve_all(script_path)
+            .into_iter()
+            .min_by_key(|e| (path_components(&e.script_path).len(), e.script_path.clone()))
+    }
+
+    pub fn script_path_for(&self, file_path: &Path) -> String {
+        extract_script_path(file_path, &self.folders)
     }
 
     /// Check if a script path exists in the workspace
     pub fn contains(&self, script_path: &str) -> bool {
-        self.get(script_path).is_some()
+        !self.resolve_all(script_path).is_empty()
     }
 
     /// Get all files in the workspace
@@ -107,40 +129,102 @@ impl Workspace {
         self.globals.insert(name);
     }
 
-    /// Get all registered globals
+    /// Identifiers actually defined at the root table somewhere in the workspace.
     pub fn globals(&self) -> &HashSet<String> {
         &self.globals
     }
 
-    /// Get all members of a file (including inherited members)
-    pub fn get_all_members(&self, script_path: &str) -> Vec<MemberInfo> {
-        let mut members = Vec::new();
-        let mut member_map: HashMap<String, MemberInfo> = HashMap::new();
+    /// Every identifier a file may refer to without declaring it: the ones defined in the workspace,
+    /// plus the env bindings inferred from usage.
+    ///
+    /// This is what the resolver checks against, so it is what decides whether an identifier is
+    /// reported as undeclared or not.
+    pub fn known_globals(&self) -> &HashSet<String> {
+        &self.known_globals
+    }
 
-        // Collect the file and all ancestors
-        let mut paths_to_check = vec![script_path.to_string()];
-        paths_to_check.extend(
-            self.get_ancestors(script_path)
-                .into_iter()
-                .map(|e| self.get_script_path(e)),
-        );
+    /// Record the identifiers `file_path` references but that nothing defines.
+    ///
+    /// Feeding these back is what lets the LSP try to "guess" the env API: Squirrel is always
+    /// embedded in an application that binds its own names into the root table, and those names
+    /// appear in no `.nut` file. They are hard to distinguish from a typo when looked at one
+    /// reference at a time, but it is easier accross the whole worksapce: a typo is (usually)
+    /// written once but an API is used multiple times.
+    pub fn set_unresolved(&mut self, file_path: &Path, names: &[String]) {
+        let key = self.script_path_for(file_path);
+        if key.is_empty() {
+            return;
+        }
 
-        // Walk from parent to child, so child members override parent
-        for path in paths_to_check.iter().rev() {
-            if let Some(entry) = self.get(path) {
-                for member in &entry.members {
-                    member_map.insert(member.name.clone(), member.clone());
+        // Withdraw whatever this file contributed previously, so re-indexing a file on does not
+        // change the totals.
+        if let Some(previous) = self.unresolved.remove(&key) {
+            for (name, count) in previous {
+                if let Some(total) = self.unresolved_totals.get_mut(&name) {
+                    *total = total.saturating_sub(count);
+                    if *total == 0 {
+                        self.unresolved_totals.remove(&name);
+                    }
                 }
             }
         }
 
-        members.extend(member_map.into_values());
-        members
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for name in names {
+            *counts.entry(name.clone()).or_default() += 1;
+        }
+        for (name, count) in &counts {
+            *self.unresolved_totals.entry(name.clone()).or_default() += count;
+        }
+
+        self.unresolved.insert(key, counts);
+    }
+
+    /// Recompute the set of identifiers the resolver considers as known.
+    pub fn infer_host_globals(&mut self) {
+        self.known_globals = self.globals.clone();
+
+        self.known_globals.extend(
+            self.unresolved_totals
+                .iter()
+                .filter(|(_, total)| **total >= HOST_GLOBAL_MIN_REFERENCES)
+                .map(|(name, _)| name.clone()),
+        );
+    }
+
+    /// Get all members of a script, including inherited ones.
+    ///
+    /// When several mods provide the same script, their members are merged: at runtime they all
+    /// write into one class, so a method added by any of them exists.
+    pub fn get_all_members(&self, script_path: &str) -> Vec<MemberInfo> {
+        let mut member_map: HashMap<String, MemberInfo> = HashMap::new();
+
+        for entry in self.resolve_all(script_path) {
+            // Walk from the furthest ancestor down, so a child overrides its parent.
+            for ancestor in self.get_ancestors(&entry.script_path).into_iter().rev() {
+                for member in &ancestor.members {
+                    member_map.insert(member.name.clone(), member.clone());
+                }
+            }
+            for member in &entry.members {
+                member_map.insert(member.name.clone(), member.clone());
+            }
+        }
+
+        member_map.into_values().collect()
     }
 
     pub fn has_member(&self, script_path: &str, member_name: &str) -> bool {
         let members = self.get_all_members(script_path);
         members.iter().any(|m| m.name == member_name)
+    }
+
+    /// Every direct child of a script, across all the copies of it in the workspace.
+    pub fn children_of(&self, script_path: &str) -> HashSet<String> {
+        self.resolve_all(script_path)
+            .iter()
+            .flat_map(|entry| entry.children.iter().cloned())
+            .collect()
     }
 
     /// Find where a method is defined, searching current class and ancestors.
@@ -150,24 +234,18 @@ impl Workspace {
         script_path: &str,
         method_name: &str,
     ) -> Option<(&PathBuf, u32, u32)> {
-        // First check the current class
-        if let Some(entry) = self.get(script_path)
-            && let Some(member) = entry
-                .members
-                .iter()
-                .find(|m| m.name == method_name && m.member_type == MemberType::Method)
-        {
-            return Some((&entry.file_path, member.line, member.column));
-        }
+        let is_method =
+            |m: &&MemberInfo| m.name == method_name && m.member_type == MemberType::Method;
 
-        // Then check ancestors
-        for ancestor in self.get_ancestors(script_path) {
-            if let Some(member) = ancestor
-                .members
-                .iter()
-                .find(|m| m.name == method_name && m.member_type == MemberType::Method)
-            {
-                return Some((&ancestor.file_path, member.line, member.column));
+        for entry in self.resolve_all(script_path) {
+            if let Some(member) = entry.members.iter().find(is_method) {
+                return Some((&entry.file_path, member.line, member.column));
+            }
+
+            for ancestor in self.get_ancestors(&entry.script_path) {
+                if let Some(member) = ancestor.members.iter().find(is_method) {
+                    return Some((&ancestor.file_path, member.line, member.column));
+                }
             }
         }
 
@@ -207,7 +285,7 @@ impl Workspace {
 
                 if let Some(parent_entry) = self.get(parent_path) {
                     ancestors.push(parent_entry);
-                    current_path = parent_path.clone();
+                    current_path = parent_entry.script_path.clone();
                 } else {
                     break;
                 }
@@ -219,16 +297,11 @@ impl Workspace {
         ancestors
     }
 
-    /// Get script path for a file entry
-    fn get_script_path(&self, entry: &FileEntry) -> String {
-        entry.script_path.clone()
-    }
-
     /// Index a single file into the workspace
     pub fn index_file(&mut self, file_path: &Path, content: &str) -> Result<(), AnalysisError> {
-        let script_path = extract_script_path(file_path);
+        let script_path = self.script_path_for(file_path);
         if script_path.is_empty() {
-            return Ok(()); // Skip files not under scripts/
+            return Ok(());
         }
 
         let tree = helpers::parse_squirrel(content)?;
@@ -238,20 +311,19 @@ impl Workspace {
         let inherits = find_inherit_calls(root, content);
 
         if let Some(inherit_call) = inherits.into_iter().next() {
-            // This is a class file
-            let parent_path = normalize_script_path(&inherit_call.parent_path);
-
+            // This is a class file. The parent is kept exactly as written in source and
+            // resolved later, once every file has been indexed.
             let entry = FileEntry {
                 file_path: file_path.to_path_buf(),
                 script_path: script_path.clone(),
                 name: inherit_call.class_name,
-                parent_path: Some(parent_path.to_string()),
+                parent_path: Some(inherit_call.parent_path),
                 parent: None, // Resolved later
                 children: Vec::new(),
                 members: extract_members_from_table(inherit_call.class_body, content),
             };
 
-            self.files.insert(script_path, entry);
+            self.insert_file(entry);
         } else {
             // Look for global table definition matching file name
             let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -267,7 +339,7 @@ impl Workspace {
                     members: extract_members_from_table(table_node, content),
                 };
 
-                self.files.insert(script_path, entry);
+                self.insert_file(entry);
             }
         }
 
@@ -277,29 +349,58 @@ impl Workspace {
         Ok(())
     }
 
+    /// Insert a file entry and make it findable by every trailing part of its path.
+    fn insert_file(&mut self, entry: FileEntry) {
+        let key = entry.script_path.clone();
+
+        for suffix in path_suffixes(&key) {
+            let keys = self.suffix_index.entry(suffix).or_default();
+            if !keys.contains(&key) {
+                keys.push(key.clone());
+            }
+        }
+
+        self.files.insert(key, entry);
+    }
+
     /// Build inheritance relationships after all files are indexed
     pub fn build_inheritance_graph(&mut self) {
         let script_paths: Vec<String> = self.files.keys().cloned().collect();
 
         for script_path in script_paths {
-            if let Some(entry) = self.files.get(&script_path)
-                && let Some(parent_path) = entry.parent_path.clone()
-            {
-                // Normalize and resolve parent
-                let normalized_parent = normalize_script_path(&parent_path);
+            let Some(parent_path) = self
+                .files
+                .get(&script_path)
+                .and_then(|e| e.parent_path.clone())
+            else {
+                continue;
+            };
 
-                if self.contains(normalized_parent) {
-                    // Update parent reference
-                    if let Some(entry_mut) = self.files.get_mut(&script_path) {
-                        entry_mut.parent = Some(normalized_parent.to_string());
-                    }
+            // A parent path may resolve to several files when mods overlay a script.
+            // Record the child against all of them, so "does this class have descendants" stays
+            // true independently of which copy is being asked about.
+            let parent_keys: Vec<String> = self
+                .resolve_all(&parent_path)
+                .iter()
+                .map(|e| e.script_path.clone())
+                .collect();
 
-                    // Add child to parent
-                    if let Some(parent_mut) = self.get_mut(normalized_parent)
-                        && !parent_mut.children.contains(&script_path)
-                    {
-                        parent_mut.children.push(script_path.clone());
-                    }
+            let Some(primary) = parent_keys.iter().min() else {
+                continue;
+            };
+
+            if let Some(entry) = self.files.get_mut(&script_path) {
+                entry.parent = Some(primary.clone());
+            }
+
+            for parent_key in &parent_keys {
+                if *parent_key == script_path {
+                    continue; // A file cannot be its own parent.
+                }
+                if let Some(parent) = self.files.get_mut(parent_key)
+                    && !parent.children.contains(&script_path)
+                {
+                    parent.children.push(script_path.clone());
                 }
             }
         }
@@ -308,43 +409,48 @@ impl Workspace {
     /// Extract global variable definitions from a file
     fn extract_globals(&mut self, root: Node, text: &str) {
         for child in root.children(&mut root.walk()) {
-            if child.kind() == "update_expression" {
-                let mut has_new_slot = false;
-                let mut global_name = None;
+            let name = match child.kind() {
+                "update_expression" => new_slot_name(child, text),
+                "class_declaration"
+                | "function_declaration"
+                | "enum_declaration"
+                | "const_declaration" => first_identifier_name(child, text),
+                _ => None,
+            };
 
-                for node in child.children(&mut child.walk()) {
-                    if node.kind() == "<-" {
-                        has_new_slot = true;
-                    } else if node.kind() == "identifier" && global_name.is_none() {
-                        global_name = Some(get_node_text(node, text).to_string());
-                    }
-                }
-
-                if has_new_slot && let Some(name) = global_name {
-                    self.register_global(name);
-                }
+            if let Some(name) = name {
+                self.register_global(name);
             }
         }
     }
 
-    /// Find similar script paths for "did you mean?" suggestions
+    /// Find similar script paths for "did you mean?" suggestions.
     pub fn find_similar_paths(&self, target: &str) -> Vec<String> {
-        let mut candidates: Vec<(String, usize)> = self
-            .files
+        let target = suffix_key(target);
+        let max_distance = target.len() / 2;
+        if max_distance == 0 {
+            return Vec::new();
+        }
+
+        let depth = count_components(&target);
+
+        let mut candidates: Vec<(usize, &str)> = self
+            .suffix_index
             .keys()
-            .map(|path| {
-                let distance = levenshtein_distance(target, path);
-                (path.clone(), distance)
+            .filter(|suffix| {
+                count_components(suffix) == depth
+                    && suffix.len().abs_diff(target.len()) < max_distance
             })
+            .map(|suffix| (levenshtein_distance(&target, suffix), suffix.as_str()))
+            .filter(|(distance, _)| *distance < max_distance)
             .collect();
 
-        candidates.sort_by_key(|(_, dist)| *dist);
+        candidates.sort_unstable();
 
         candidates
             .into_iter()
             .take(3)
-            .filter(|(_, dist)| *dist < target.len() / 2)
-            .map(|(path, _)| path)
+            .map(|(_, path)| path.to_string())
             .collect()
     }
 
@@ -378,22 +484,110 @@ impl Workspace {
 
 /// Extract script path from a file path.
 /// E.g., "/path/to/scripts/statistics/statistics_manager.nut" -> "statistics/statistics_manager"
-fn extract_script_path(file_path: &Path) -> String {
-    // Normalize paths for Windows
-    let path_str = file_path.to_string_lossy().replace('\\', "/");
+///
+/// Only called on children of the script root, where `this` *is* the root table:
+///   `foo <- ...`        -> foo
+///   `::foo <- ...`      -> foo
+///   `this.foo <- ...`   -> foo
+///   `some.thing <- ...` -> None  (writes into `some`, not the root table)
+///   `this.foo.bar <- .` -> None  (writes into `this.foo`)
+fn new_slot_name(node: Node, text: &str) -> Option<String> {
+    let children: Vec<Node> = node.children(&mut node.walk()).collect();
 
-    if let Some(scripts_idx) = path_str.find("scripts/") {
-        let after_scripts = &path_str[scripts_idx + 8..]; // len("scripts/") = 8
-        return after_scripts.trim_end_matches(".nut").to_string();
+    // A new slot, not a plain assignment or compound update.
+    if !children.iter().any(|c| c.kind() == "<-") {
+        return None;
     }
 
-    // Not under scripts/, return empty
-    String::new()
+    let target = *children.first()?;
+
+    match target.kind() {
+        "identifier" => Some(get_node_text(target, text).to_string()),
+        "global_variable" => direct_identifiers(target)
+            .first()
+            .map(|c| get_node_text(*c, text).to_string()),
+        "deref_expression" => {
+            let identifiers = direct_identifiers(target);
+            // Exactly `<base>.<member>`, and the base must be the root table.
+            match identifiers.as_slice() {
+                [base, member] if get_node_text(*base, text) == "this" => {
+                    Some(get_node_text(*member, text).to_string())
+                },
+                _ => None,
+            }
+        },
+        _ => None,
+    }
 }
 
-/// Normalize a script path (remove "scripts/" prefix and ".nut" suffix)
-fn normalize_script_path(path: &str) -> &str {
-    path.trim_start_matches("scripts/").trim_end_matches(".nut")
+/// Direct `identifier` children of a node.
+fn direct_identifiers<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
+    node.children(&mut node.walk())
+        .filter(|c| c.kind() == "identifier")
+        .collect()
+}
+
+/// Name of a declaration: its first identifier child (`class Foo extends Bar` -> `Foo`).
+fn first_identifier_name(node: Node, text: &str) -> Option<String> {
+    node.children(&mut node.walk())
+        .find(|c| c.kind() == "identifier")
+        .map(|c| get_node_text(c, text).to_string())
+}
+
+fn count_components(path: &str) -> usize {
+    path.split(['/', '\\'])
+        .filter(|c| !c.is_empty() && *c != ".")
+        .count()
+}
+
+/// Split a path into non-empty components, normalizing separators.
+fn path_components(path: &str) -> Vec<&str> {
+    path.split(['/', '\\'])
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect()
+}
+
+fn strip_nut_extension(path: &str) -> &str {
+    path.strip_suffix(".nut").unwrap_or(path)
+}
+
+/// Compute the key for a file on disk: its path relative to the workspace folder containing it,
+/// without the `.nut` extension.
+fn extract_script_path(file_path: &Path, folders: &[PathBuf]) -> String {
+    let path_str = file_path.to_string_lossy().replace('\\', "/");
+
+    // Relative to the innermost (longest-matching) workspace folder.
+    let mut relative = path_str.as_str();
+    let mut matched_len = 0;
+    for folder in folders {
+        let folder = folder.to_string_lossy().replace('\\', "/");
+        let folder = folder.trim_end_matches('/');
+        if folder.is_empty() || folder.len() < matched_len {
+            continue;
+        }
+
+        if let Some(rest) = path_str.strip_prefix(folder)
+            && (rest.is_empty() || rest.starts_with('/'))
+        {
+            matched_len = folder.len();
+            relative = rest;
+        }
+    }
+
+    suffix_key(relative)
+}
+
+/// Every trailing run of components of a path, longest first.
+fn path_suffixes(key: &str) -> Vec<String> {
+    let components = path_components(key);
+
+    (0..components.len())
+        .map(|i| components[i..].join("/"))
+        .collect()
+}
+
+fn suffix_key(path: &str) -> String {
+    strip_nut_extension(&path_components(path).join("/")).to_string()
 }
 
 /// Find a global table definition that matches the file name.
@@ -584,63 +778,192 @@ fn extract_members_from_table(node: Node, text: &str) -> Vec<MemberInfo> {
 
 /// Simple Levenshtein distance for suggestions
 fn levenshtein_distance(s1: &str, s2: &str) -> usize {
-    let len1 = s1.chars().count();
-    let len2 = s2.chars().count();
-    let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
+    let s2_chars: Vec<char> = s2.chars().collect();
 
-    // Initialize first column
-    for (i, row) in matrix.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    // Initialize first row
-    for (j, cell) in matrix[0].iter_mut().enumerate() {
-        *cell = j;
-    }
+    // Two rows are enough: each cell only looks at the row above and the cell to its
+    // left. The full matrix was allocating a Vec per row, which is what made this
+    // expensive when scoring thousands of candidates.
+    let mut previous: Vec<usize> = (0..=s2_chars.len()).collect();
+    let mut current = vec![0; s2_chars.len() + 1];
 
     for (i, c1) in s1.chars().enumerate() {
-        for (j, c2) in s2.chars().enumerate() {
-            let cost = usize::from(c1 != c2);
-            matrix[i + 1][j + 1] = (matrix[i][j + 1] + 1)
-                .min(matrix[i + 1][j] + 1)
-                .min(matrix[i][j] + cost);
+        current[0] = i + 1;
+
+        for (j, c2) in s2_chars.iter().enumerate() {
+            let cost = usize::from(c1 != *c2);
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + cost);
         }
+
+        std::mem::swap(&mut previous, &mut current);
     }
 
-    matrix[len1][len2]
+    previous[s2_chars.len()]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_extract_script_path() {
-        assert_eq!(
-            extract_script_path(Path::new(
-                "/path/to/scripts/statistics/statistics_manager.nut"
-            )),
-            "statistics/statistics_manager"
-        );
-        assert_eq!(
-            extract_script_path(Path::new("scripts/entity/tactical/actor.nut")),
-            "entity/tactical/actor"
-        );
-        assert_eq!(extract_script_path(Path::new("/some/other/path.nut")), "");
+    fn ws() -> Workspace {
+        Workspace::with_folders(vec![PathBuf::from("/ws")])
     }
 
     #[test]
-    fn test_normalize_script_path() {
+    fn test_script_path_is_relative_to_the_workspace_folder() {
+        let workspace = ws();
         assert_eq!(
-            normalize_script_path("scripts/entity/tactical/actor"),
-            "entity/tactical/actor"
+            workspace.script_path_for(Path::new("/ws/legends/scripts/entity/actor.nut")),
+            "legends/scripts/entity/actor"
         );
+        // No directory convention is assumed: a project with no scripts/ dir is keyed
+        // the same way, rather than being skipped.
         assert_eq!(
-            normalize_script_path("entity/tactical/actor.nut"),
-            "entity/tactical/actor"
+            workspace.script_path_for(Path::new("/ws/ui/font.nut")),
+            "ui/font"
         );
+    }
+
+    #[test]
+    fn test_path_suffixes() {
         assert_eq!(
-            normalize_script_path("scripts/entity/tactical/actor.nut"),
-            "entity/tactical/actor"
+            path_suffixes("legends/scripts/entity/actor"),
+            vec![
+                "legends/scripts/entity/actor",
+                "scripts/entity/actor",
+                "entity/actor",
+                "actor",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_by_partial_path() {
+        let mut workspace = ws();
+        workspace
+            .index_file(
+                Path::new("/ws/legends/scripts/entity/tactical/actor.nut"),
+                r#"this.actor <- this.inherit("scripts/entity/base", {});"#,
+            )
+            .unwrap();
+
+        // Every way source refers to this file resolves to it.
+        for path in [
+            "scripts/entity/tactical/actor",
+            "entity/tactical/actor",
+            "entity/tactical/actor.nut",
+            "legends/scripts/entity/tactical/actor",
+        ] {
+            assert!(workspace.contains(path), "'{path}' should resolve");
+        }
+
+        // A path that is not a trailing run of components does not.
+        assert!(!workspace.contains("tactical/aktor"));
+        assert!(!workspace.contains("entity/actor"));
+    }
+
+    #[test]
+    fn test_mods_overlaying_a_script_all_resolve() {
+        let mut workspace = ws();
+        for mod_name in ["vanilla", "legends", "rotu"] {
+            workspace
+                .index_file(
+                    Path::new(&format!("/ws/{mod_name}/scripts/entity/actor.nut")),
+                    r#"this.actor <- this.inherit("scripts/entity/base", {});"#,
+                )
+                .unwrap();
+        }
+
+        assert_eq!(workspace.resolve_all("entity/actor").len(), 3);
+        // get() is stable rather than insertion-order-dependent.
+        assert_eq!(
+            workspace.get("entity/actor").unwrap().script_path,
+            "legends/scripts/entity/actor"
+        );
+    }
+
+    #[test]
+    fn test_extract_globals_covers_all_top_level_declarations() {
+        let mut workspace = ws();
+        let code = r#"
+            Font <- {};
+            class Sprite {}
+            function require(_path) {}
+            enum Align { Left, Right }
+            const VERSION = "1.0";
+            local hidden = 1;
+        "#;
+        workspace
+            .index_file(Path::new("/ws/ui/font.nut"), code)
+            .unwrap();
+
+        let globals = workspace.globals();
+        for expected in ["Font", "Sprite", "require", "Align", "VERSION"] {
+            assert!(globals.contains(expected), "missing global '{expected}'");
+        }
+        assert!(
+            !globals.contains("hidden"),
+            "top-level 'local' is file-scoped, not a global"
+        );
+    }
+
+    #[test]
+    fn test_extract_globals_new_slot_shapes() {
+        let mut workspace = ws();
+        let code = r#"
+            plain <- 1;
+            ::explicit <- 2;
+            this.actor <- this.inherit("scripts/entity/base", {});
+            some.thing <- 3;
+            this.nested.deep <- 4;
+        "#;
+        workspace
+            .index_file(Path::new("/ws/scripts/entity/actor.nut"), code)
+            .unwrap();
+
+        let globals = workspace.globals();
+        for expected in ["plain", "explicit", "actor"] {
+            assert!(globals.contains(expected), "missing global '{expected}'");
+        }
+        // These write into another table, not the root table.
+        for unexpected in ["thing", "deep", "nested", "some"] {
+            assert!(
+                !globals.contains(unexpected),
+                "'{unexpected}' is not a root-table slot"
+            );
+        }
+    }
+
+    #[test]
+    fn test_host_globals_are_inferred_from_repeated_use() {
+        let mut workspace = ws();
+
+        workspace.set_unresolved(Path::new("/ws/a.nut"), &["Font".to_string()]);
+        workspace.set_unresolved(
+            Path::new("/ws/b.nut"),
+            &["Font".to_string(), "typo".to_string()],
+        );
+        workspace.infer_host_globals();
+
+        // Used twice, defined nowhere: the host provides it.
+        assert!(workspace.known_globals().contains("Font"));
+        // Used once, defined nowhere: still a typo.
+        assert!(!workspace.known_globals().contains("typo"));
+    }
+
+    #[test]
+    fn test_reindexing_a_file_does_not_inflate_reference_counts() {
+        let mut workspace = ws();
+
+        // The same file, re-indexed on every keystroke, must not look like two files.
+        workspace.set_unresolved(Path::new("/ws/a.nut"), &["Font".to_string()]);
+        workspace.set_unresolved(Path::new("/ws/a.nut"), &["Font".to_string()]);
+        workspace.infer_host_globals();
+
+        assert!(
+            !workspace.known_globals().contains("Font"),
+            "one reference in one file, however many times that file was re-indexed"
         );
     }
 
@@ -725,14 +1048,10 @@ mod tests {
 
         // Check parent-child relationships
         let human = workspace.get("entity/tactical/human").unwrap();
-        assert_eq!(human.parent, Some("entity/tactical/actor".to_string()));
-
         let actor = workspace.get("entity/tactical/actor").unwrap();
-        assert!(
-            actor
-                .children
-                .contains(&"entity/tactical/human".to_string())
-        );
+
+        assert_eq!(human.parent.as_ref(), Some(&actor.script_path));
+        assert!(actor.children.contains(&human.script_path));
     }
 
     #[test]

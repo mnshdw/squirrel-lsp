@@ -3,8 +3,11 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use squirrel_lsp::symbol_resolver::compute_symbol_diagnostics_with_globals;
+use squirrel_lsp::symbol_resolver::{
+    collect_unresolved_identifiers, compute_symbol_diagnostics_with_globals,
+};
 use squirrel_lsp::syntax_analyzer::compute_syntax_diagnostics;
+use squirrel_lsp::workspace::Workspace;
 use tower_lsp::lsp_types::DiagnosticSeverity;
 
 fn check_file(path: &Path, globals: &HashSet<String>) -> (usize, usize) {
@@ -92,12 +95,33 @@ fn main() {
         std::process::exit(1);
     }
 
-    let globals = HashSet::new(); // Could be populated from workspace
+    let cwd = env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let mut workspace = Workspace::with_folders(vec![cwd]);
+
+    for file in &files {
+        if let Ok(source) = fs::read_to_string(file) {
+            let _ = workspace.index_file(file, &source);
+        }
+    }
+    workspace.build_inheritance_graph();
+
+    for file in &files {
+        let Ok(source) = fs::read_to_string(file) else {
+            continue;
+        };
+        let unresolved =
+            collect_unresolved_identifiers(&file.to_string_lossy(), &source, workspace.globals())
+                .unwrap_or_default();
+        workspace.set_unresolved(file, &unresolved);
+    }
+    workspace.infer_host_globals();
+
+    let globals = workspace.known_globals();
     let mut total_errors = 0;
     let mut total_warnings = 0;
 
     for file in &files {
-        let (e, w) = check_file(file, &globals);
+        let (e, w) = check_file(file, globals);
         total_errors += e;
         total_warnings += w;
     }

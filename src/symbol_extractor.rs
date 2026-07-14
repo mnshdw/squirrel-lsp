@@ -10,11 +10,22 @@ use crate::errors::AnalysisError;
 use crate::helpers;
 use crate::symbols::{FileSymbols, Symbol, SymbolKind, SymbolMap, Table, extract_script_path};
 
-/// Extract symbols from a Squirrel file
+/// Extract symbols from a Squirrel file, parsing it first.
+#[allow(dead_code, reason = "tests")]
 pub fn extract_file_symbols(file_path: &str, text: &str) -> Result<FileSymbols, AnalysisError> {
     let tree = helpers::parse_squirrel(text)?;
-    let root = tree.root_node();
+    Ok(extract_file_symbols_from_root(
+        file_path,
+        text,
+        tree.root_node(),
+    ))
+}
 
+/// Extract symbols from an already-parsed file.
+///
+/// Callers that have a tree in hand should use this: parsing is the dominant cost of
+/// analysing a file, and doing it twice for the same text doubles it.
+pub fn extract_file_symbols_from_root(file_path: &str, text: &str, root: Node) -> FileSymbols {
     let script_path = extract_script_path(file_path);
     let mut file_symbols = FileSymbols {
         path: script_path.clone(),
@@ -28,7 +39,7 @@ pub fn extract_file_symbols(file_path: &str, text: &str) -> Result<FileSymbols, 
         process_top_level_node(child, text, &mut file_symbols, &script_path);
     }
 
-    Ok(file_symbols)
+    file_symbols
 }
 
 fn process_top_level_node(
