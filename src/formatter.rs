@@ -1313,10 +1313,8 @@ impl<'a> Formatter<'a> {
 
             match token.text.as_str() {
                 "[" => depth += 1,
-                "]" => {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
+                "]" if depth > 0 => {
+                    depth -= 1;
                 },
                 _ => {},
             }
@@ -1431,10 +1429,8 @@ impl<'a> Formatter<'a> {
                     }
                 },
                 ";" => break,
-                "," => {
-                    if nesting_depth == 0 && ternary_depth == 0 && seen_colon {
-                        break;
-                    }
+                "," if nesting_depth == 0 && ternary_depth == 0 && seen_colon => {
+                    break;
                 },
                 _ => {},
             }

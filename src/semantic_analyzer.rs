@@ -156,9 +156,10 @@ pub fn compute_semantic_tokens(text: &str) -> Result<Vec<SemanticToken>, Analysi
             prev_col = start_pos.character;
         } else {
             let token_text = &text[start_byte..end_byte];
-            let mut current_line = start_pos.line;
 
-            for (i, line_text) in token_text.split('\n').enumerate() {
+            for (current_line, (i, line_text)) in
+                (start_pos.line..).zip(token_text.split('\n').enumerate())
+            {
                 let line_start_col = if i == 0 { start_pos.character } else { 0 };
                 let line_length = line_text.encode_utf16().count() as u32;
 
@@ -179,7 +180,6 @@ pub fn compute_semantic_tokens(text: &str) -> Result<Vec<SemanticToken>, Analysi
 
                 prev_line = current_line;
                 prev_col = line_start_col + line_length;
-                current_line += 1;
             }
         }
     }

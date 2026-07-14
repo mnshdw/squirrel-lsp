@@ -282,14 +282,10 @@ fn extract_inherit_call<'a>(node: Node<'a>, text: &str) -> Option<(String, Optio
                     is_inherit = true;
                 }
             },
-            "deref_expression" => {
-                let mut last_ident = "";
-                for subchild in child.children(&mut child.walk()) {
-                    if subchild.kind() == "identifier" {
-                        last_ident = helpers::node_text(subchild, text);
-                    }
-                }
-                if last_ident == "inherit" {
+            "deref_expression" | "global_variable" => {
+                if let Some(last) = helpers::find_last_identifier(child)
+                    && helpers::node_text(last, text) == "inherit"
+                {
                     is_inherit = true;
                 }
             },

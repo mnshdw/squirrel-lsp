@@ -9,6 +9,7 @@ use crate::workspace::Workspace;
 #[derive(Debug, Clone)]
 pub struct InheritCall<'tree> {
     pub class_name: String,
+    pub class_name_node: Option<Node<'tree>>,
     pub parent_path: String,
     pub parent_path_node: Node<'tree>,
     pub class_body: Node<'tree>,
@@ -27,6 +28,7 @@ pub fn find_inherit_calls<'tree>(root: Node<'tree>, text: &str) -> Vec<InheritCa
         if node.kind() == "update_expression" {
             let mut has_new_slot_op = false;
             let mut class_name = String::new();
+            let mut class_name_node = None;
             let mut call_expr = None;
 
             for child in node.children(cursor) {
@@ -35,6 +37,7 @@ pub fn find_inherit_calls<'tree>(root: Node<'tree>, text: &str) -> Vec<InheritCa
                 {
                     if let Some(name) = helpers::extract_identifier_name(child, text) {
                         class_name = name;
+                        class_name_node = helpers::find_last_identifier(child);
                     }
                 } else if child.kind() == "<-" {
                     has_new_slot_op = true;
@@ -50,6 +53,7 @@ pub fn find_inherit_calls<'tree>(root: Node<'tree>, text: &str) -> Vec<InheritCa
             {
                 results.push(InheritCall {
                     class_name,
+                    class_name_node,
                     parent_path: inherit.0,
                     parent_path_node: inherit.1,
                     class_body: inherit.2,
@@ -82,7 +86,8 @@ fn parse_inherit_call<'tree>(
                     is_inherit = true;
                 }
             },
-            "deref_expression" => {
+            // `this.inherit(…)` is a deref_expression, but `::inherit(…)` is a global_variable.
+            "deref_expression" | "global_variable" => {
                 if let Some(last) = helpers::find_last_identifier(child)
                     && get_node_text(last, text) == "inherit"
                 {

@@ -463,13 +463,19 @@ impl LanguageServer for Backend {
         let file_path = uri.to_file_path().unwrap_or_default();
         let workspace = self.workspace.read().await;
 
-        if let Some(result) = navigation::find_definition(&text, position, &file_path, &workspace)
-            && let Some(location) = navigation::definition_to_location(result)
-        {
-            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
-        }
+        let locations: Vec<_> = navigation::find_definitions(&text, position, &file_path, &workspace)
+            .into_iter()
+            .filter_map(navigation::definition_to_location)
+            .collect();
 
-        Ok(None)
+        match locations.len() {
+            0 => Ok(None),
+            1 => Ok(Some(GotoDefinitionResponse::Scalar(
+                locations.into_iter().next().expect("length checked"),
+            ))),
+            // Genuinely defined in several places: let the editor offer the choice.
+            _ => Ok(Some(GotoDefinitionResponse::Array(locations))),
+        }
     }
 
     async fn document_symbol(

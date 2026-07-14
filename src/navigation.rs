@@ -10,12 +10,19 @@ use tree_sitter::Node;
 use crate::helpers;
 use crate::workspace::{MemberType, Workspace};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum SymbolAtPosition {
-    InheritParentPath(String),
-    MethodCall(String),
-    FunctionDeclaration(),
-    Identifier(String),
+    /// A string naming another file: `inherit("scripts/…")`, `::mods_hookExactClass("…")`.
+    ScriptPath(String),
+    /// A member access, `base.name`. The base is carried along because it is what says
+    /// *which* class the member belongs to.
+    Member {
+        base: Option<String>,
+        name: String,
+    },
+    /// A bare identifier: a class name, a global, a local.
+    Name(String),
+    FunctionDeclaration,
 }
 
 fn find_symbol_at_position(text: &str, position: Position) -> Option<SymbolAtPosition> {
@@ -26,6 +33,19 @@ fn find_symbol_at_position(text: &str, position: Position) -> Option<SymbolAtPos
     let node = find_deepest_node_at(root, byte_offset)?;
 
     classify_node(node, text)
+}
+
+/// The functions whose first string argument names another script.
+fn names_a_script_path(callee: &str) -> bool {
+    matches!(
+        callee,
+        "inherit"
+            | "mods_hookExactClass"
+            | "mods_hookBaseClass"
+            | "mods_hookDescendants"
+            | "mods_hookNewObject"
+            | "mods_hookNewObjectOnce"
+    )
 }
 
 fn find_deepest_node_at(node: Node, byte_offset: usize) -> Option<Node> {
@@ -47,64 +67,90 @@ fn classify_node(node: Node, text: &str) -> Option<SymbolAtPosition> {
 
     match node.kind() {
         "string" | "string_content" => {
-            if is_inside_inherit_call(node, text) {
+            if is_inside_script_path_call(node, text) {
                 let path = node_text.trim_matches('"').to_string();
-                return Some(SymbolAtPosition::InheritParentPath(path));
+                return Some(SymbolAtPosition::ScriptPath(path));
             }
             None
         },
         "identifier" => {
-            if let Some(parent) = node.parent() {
-                match parent.kind() {
-                    "deref_expression" => {
-                        if let Some(grandparent) = parent.parent()
-                            && grandparent.kind() == "call_expression"
-                        {
-                            return Some(SymbolAtPosition::MethodCall(node_text.to_string()));
-                        }
-                        return Some(SymbolAtPosition::MethodCall(node_text.to_string()));
-                    },
-                    "call_expression" => {
-                        return Some(SymbolAtPosition::MethodCall(node_text.to_string()));
-                    },
-                    "function_declaration" => {
-                        return Some(SymbolAtPosition::FunctionDeclaration());
-                    },
-                    _ => {},
-                }
+            let Some(parent) = node.parent() else {
+                return Some(SymbolAtPosition::Name(node_text.to_string()));
+            };
+
+            match parent.kind() {
+                "function_declaration" => Some(SymbolAtPosition::FunctionDeclaration),
+
+                // Either side of a `.` lands here, and they mean opposite things: in
+                // `rotu_mod_aura_abstract.create()`, the left is the class being referred
+                // to and the right is a method of it. Treating both as a method name (as
+                // this used to) makes Go to Definition on a class name find nothing.
+                "deref_expression" => {
+                    if is_member_of_deref(node) {
+                        Some(SymbolAtPosition::Member {
+                            base: deref_base_name(node, text),
+                            name: node_text.to_string(),
+                        })
+                    } else {
+                        Some(SymbolAtPosition::Name(node_text.to_string()))
+                    }
+                },
+
+                // A bare call, `create()`: a method on whatever class we are inside.
+                "call_expression" => Some(SymbolAtPosition::Member {
+                    base: None,
+                    name: node_text.to_string(),
+                }),
+
+                _ => Some(SymbolAtPosition::Name(node_text.to_string())),
             }
-            Some(SymbolAtPosition::Identifier(node_text.to_string()))
         },
         _ => None,
     }
 }
 
-fn is_inside_inherit_call(node: Node, source: &str) -> bool {
+/// True when this identifier is on the right of the `.` (or `::`), i.e. it is the member
+/// being accessed rather than the thing being accessed.
+fn is_member_of_deref(node: Node) -> bool {
+    node.prev_sibling()
+        .is_some_and(|prev| matches!(prev.kind(), "." | "::"))
+}
+
+/// Name of the thing a member is being read from: the identifier just left of the `.`.
+fn deref_base_name(member: Node, text: &str) -> Option<String> {
+    let dot = member.prev_sibling()?;
+    let base = dot.prev_sibling()?;
+
+    // `foo.bar`      -> "foo"
+    // `this.m.Rage`  -> "m"   (the immediate base; not resolvable, and that is fine)
+    let ident = helpers::find_last_identifier(base)?;
+    Some(ident.utf8_text(text.as_bytes()).ok()?.to_string())
+}
+
+/// Is this string the path argument of a call that names another script?
+fn is_inside_script_path_call(node: Node, source: &str) -> bool {
     let source_bytes = source.as_bytes();
     let mut current = node;
+
     while let Some(parent) = current.parent() {
         if parent.kind() == "call_expression" {
             for child in parent.children(&mut parent.walk()) {
-                if child.kind() == "identifier" {
-                    let name = child.utf8_text(source_bytes).unwrap_or("");
-                    if name == "inherit" {
-                        return true;
-                    }
-                }
-                if child.kind() == "deref_expression" {
-                    for deref_child in child.children(&mut child.walk()) {
-                        if deref_child.kind() == "identifier"
-                            && let Ok(name) = deref_child.utf8_text(source_bytes)
-                            && name == "inherit"
-                        {
-                            return true;
-                        }
-                    }
+                let callee = match child.kind() {
+                    "identifier" => child.utf8_text(source_bytes).ok().map(str::to_string),
+                    "deref_expression" | "global_variable" => helpers::find_last_identifier(child)
+                        .and_then(|n| n.utf8_text(source_bytes).ok())
+                        .map(str::to_string),
+                    _ => None,
+                };
+
+                if callee.is_some_and(|name| names_a_script_path(&name)) {
+                    return true;
                 }
             }
         }
         current = parent;
     }
+
     false
 }
 
@@ -143,53 +189,152 @@ pub struct DefinitionResult {
     pub column: u32,
 }
 
+/// The class a file is editing, when the cursor sits inside a `::mods_hook*` callback.
+struct HookContext {
+    target_path: String,
+    param_name: Option<String>,
+}
+
+fn enclosing_hook(text: &str, byte_offset: usize) -> Option<HookContext> {
+    let tree = helpers::parse_squirrel(text).ok()?;
+
+    crate::bb_support::find_hook_calls(tree.root_node(), text)
+        .into_iter()
+        .find(|hook| {
+            byte_offset >= hook.hook_function.start_byte()
+                && byte_offset <= hook.hook_function.end_byte()
+        })
+        .map(|hook| HookContext {
+            target_path: hook.target_path,
+            param_name: hook.hook_param_name,
+        })
+}
+
+/// All the places a symbol could be defined, best first.
+pub fn find_definitions(
+    text: &str,
+    position: Position,
+    current_file: &Path,
+    workspace: &Workspace,
+) -> Vec<DefinitionResult> {
+    let Some(symbol) = find_symbol_at_position(text, position) else {
+        return Vec::new();
+    };
+
+    let hook = byte_offset_at(text, position).and_then(|offset| enclosing_hook(text, offset));
+
+    match symbol {
+        SymbolAtPosition::ScriptPath(path) => workspace
+            .resolve_all(&path)
+            .iter()
+            .map(|entry| DefinitionResult {
+                file_path: entry.file_path.clone(),
+                line: entry.line,
+                column: entry.column,
+            })
+            .collect(),
+
+        SymbolAtPosition::Name(name) => {
+            // A class or table by that name: `rotu_mod_aura_abstract`, `orc_warlord`.
+            let by_name: Vec<DefinitionResult> = workspace
+                .find_by_name(&name)
+                .iter()
+                .map(|entry| DefinitionResult {
+                    file_path: entry.file_path.clone(),
+                    line: entry.line,
+                    column: entry.column,
+                })
+                .collect();
+
+            if !by_name.is_empty() {
+                return by_name;
+            }
+
+            // Otherwise it may still be a method used without a receiver.
+            find_member(workspace, current_file, hook.as_ref(), None, &name)
+        },
+
+        SymbolAtPosition::Member { base, name } => find_member(
+            workspace,
+            current_file,
+            hook.as_ref(),
+            base.as_deref(),
+            &name,
+        ),
+
+        SymbolAtPosition::FunctionDeclaration => Vec::new(),
+    }
+}
+
+/// Resolve `base.name` by working out which class `base` refers to.
+fn find_member(
+    workspace: &Workspace,
+    current_file: &Path,
+    hook: Option<&HookContext>,
+    base: Option<&str>,
+    name: &str,
+) -> Vec<DefinitionResult> {
+    let enclosing_class = || match hook {
+        Some(h) => h.target_path.clone(),
+        None => workspace.script_path_for(current_file),
+    };
+
+    let owner: Option<String> = match base {
+        Some(b) if hook.is_some_and(|h| h.param_name.as_deref() == Some(b)) => {
+            Some(enclosing_class())
+        },
+        Some("this") => Some(enclosing_class()),
+        Some(b) => workspace
+            .find_by_name(b)
+            .first()
+            .map(|entry| entry.script_path.clone()),
+        None => Some(enclosing_class()),
+    };
+
+    if let Some(owner) = owner.filter(|o| !o.is_empty()) {
+        if workspace.contains(&owner) {
+            return workspace
+                .find_method_definition(&owner, name)
+                .map(|(file_path, line, column)| DefinitionResult {
+                    file_path: file_path.clone(),
+                    line,
+                    column,
+                })
+                .into_iter()
+                .collect();
+        }
+
+        if hook.is_some() {
+            return Vec::new();
+        }
+    }
+
+    workspace
+        .find_method_anywhere(name)
+        .into_iter()
+        .map(|(file_path, line, column, _)| DefinitionResult {
+            file_path: file_path.clone(),
+            line,
+            column,
+        })
+        .collect()
+}
+
+/// The single best definition. The server uses [`find_definitions`], which can offer
+/// several when a name is genuinely defined in more than one place.
+#[allow(
+    dead_code,
+    reason = "used by tests and by callers wanting a single answer"
+)]
 pub fn find_definition(
     text: &str,
     position: Position,
     current_file: &Path,
     workspace: &Workspace,
 ) -> Option<DefinitionResult> {
-    let symbol = find_symbol_at_position(text, position)?;
-
-    match symbol {
-        SymbolAtPosition::InheritParentPath(path) => {
-            if let Some(entry) = workspace.get(&path) {
-                return Some(DefinitionResult {
-                    file_path: entry.file_path.clone(),
-                    line: 0,
-                    column: 0,
-                });
-            }
-        },
-        SymbolAtPosition::MethodCall(method_name) | SymbolAtPosition::Identifier(method_name) => {
-            let script_path = workspace.script_path_for(current_file);
-
-            if !script_path.is_empty()
-                && let Some((file_path, line, column)) =
-                    workspace.find_method_definition(&script_path, &method_name)
-            {
-                return Some(DefinitionResult {
-                    file_path: file_path.clone(),
-                    line,
-                    column,
-                });
-            }
-
-            let results = workspace.find_method_anywhere(&method_name);
-            if let Some((file_path, line, column, _)) = results.first() {
-                return Some(DefinitionResult {
-                    file_path: (*file_path).clone(),
-                    line: *line,
-                    column: *column,
-                });
-            }
-        },
-        SymbolAtPosition::FunctionDeclaration() => {
-            return None;
-        },
-    }
-
-    None
+    find_definitions(text, position, current_file, workspace)
+        .into_iter()
+        .next()
 }
 
 pub fn definition_to_location(result: DefinitionResult) -> Option<Location> {
@@ -543,10 +688,36 @@ mod tests {
         let pos = Position::new(0, 30); // Inside the string
 
         let symbol = find_symbol_at_position(code, pos);
-        assert!(matches!(
+        assert!(matches!(symbol, Some(SymbolAtPosition::ScriptPath(_))));
+    }
+
+    #[test]
+    fn test_find_symbol_in_global_inherit() {
+        // `::inherit(…)` is a global_variable, not a deref_expression.
+        let code = r#"this.foo <- ::inherit("scripts/skills/skill", {});"#;
+        let pos = Position::new(0, 27);
+
+        let symbol = find_symbol_at_position(code, pos);
+        assert_eq!(
             symbol,
-            Some(SymbolAtPosition::InheritParentPath(_))
-        ));
+            Some(SymbolAtPosition::ScriptPath(
+                "scripts/skills/skill".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_find_symbol_in_hook_path() {
+        let code = r#"::mods_hookExactClass("entity/tactical/actor", function(o) {});"#;
+        let pos = Position::new(0, 25);
+
+        let symbol = find_symbol_at_position(code, pos);
+        assert_eq!(
+            symbol,
+            Some(SymbolAtPosition::ScriptPath(
+                "entity/tactical/actor".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -555,7 +726,19 @@ mod tests {
         let pos = Position::new(0, 7); // On "getContainer"
 
         let symbol = find_symbol_at_position(code, pos);
-        assert!(matches!(symbol, Some(SymbolAtPosition::MethodCall(_))));
+        assert!(matches!(symbol, Some(SymbolAtPosition::Member { .. })));
+    }
+
+    #[test]
+    fn test_deref_base_is_a_name_not_a_method() {
+        let code = r#"function f() { aura_abstract.create(); }"#;
+        let pos = Position::new(0, 16);
+
+        let symbol = find_symbol_at_position(code, pos);
+        assert_eq!(
+            symbol,
+            Some(SymbolAtPosition::Name("aura_abstract".to_string()))
+        );
     }
 }
 

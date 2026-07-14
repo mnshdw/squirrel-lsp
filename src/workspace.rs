@@ -54,6 +54,8 @@ pub struct FileEntry {
     pub children: Vec<String>,
     /// Members (methods) defined in this file
     pub members: Vec<MemberInfo>,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// The workspace indexed by script path.
@@ -66,6 +68,8 @@ pub struct Workspace {
     files: HashMap<String, FileEntry>,
     /// Trailing path suffix -> file keys having that suffix
     suffix_index: HashMap<String, Vec<String>>,
+    /// Class/table name -> file keys defining it
+    name_index: HashMap<String, Vec<String>>,
     /// Global identifiers defined across all files
     globals: HashSet<String>,
     /// File key -> identifiers that file references but nothing defines
@@ -267,6 +271,8 @@ impl Workspace {
                 }
             }
         }
+
+        results.sort_by(|a, b| a.3.cmp(b.3).then_with(|| a.1.cmp(&b.1)));
         results
     }
 
@@ -313,6 +319,8 @@ impl Workspace {
         if let Some(inherit_call) = inherits.into_iter().next() {
             // This is a class file. The parent is kept exactly as written in source and
             // resolved later, once every file has been indexed.
+            let (line, column) = node_position(inherit_call.class_name_node);
+
             let entry = FileEntry {
                 file_path: file_path.to_path_buf(),
                 script_path: script_path.clone(),
@@ -321,6 +329,8 @@ impl Workspace {
                 parent: None, // Resolved later
                 children: Vec::new(),
                 members: extract_members_from_table(inherit_call.class_body, content),
+                line,
+                column,
             };
 
             self.insert_file(entry);
@@ -328,7 +338,10 @@ impl Workspace {
             // Look for global table definition matching file name
             let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
-            if let Some((name, table_node)) = find_global_table(root, content, file_stem) {
+            if let Some((name, name_node, table_node)) = find_global_table(root, content, file_stem)
+            {
+                let (line, column) = node_position(name_node);
+
                 let entry = FileEntry {
                     file_path: file_path.to_path_buf(),
                     script_path: script_path.clone(),
@@ -337,6 +350,8 @@ impl Workspace {
                     parent: None,
                     children: Vec::new(),
                     members: extract_members_from_table(table_node, content),
+                    line,
+                    column,
                 };
 
                 self.insert_file(entry);
@@ -360,7 +375,27 @@ impl Workspace {
             }
         }
 
+        let by_name = self.name_index.entry(entry.name.clone()).or_default();
+        if !by_name.contains(&key) {
+            by_name.push(key.clone());
+        }
+
         self.files.insert(key, entry);
+    }
+
+    /// Find the file(s) defining a class or table by its name, e.g. `rotu_mod_aura_abstract`.
+    ///
+    /// This is how a bare identifier in source is resolved: BB writes
+    /// `rotu_mod_aura_abstract.create()`, referring to the class by name rather than by path.
+    pub fn find_by_name(&self, name: &str) -> Vec<&FileEntry> {
+        let mut entries: Vec<&FileEntry> = self
+            .name_index
+            .get(name)
+            .map(|keys| keys.iter().filter_map(|k| self.files.get(k)).collect())
+            .unwrap_or_default();
+
+        entries.sort_by(|a, b| a.script_path.cmp(&b.script_path));
+        entries
     }
 
     /// Build inheritance relationships after all files are indexed
@@ -596,16 +631,17 @@ fn find_global_table<'tree>(
     root: Node<'tree>,
     text: &str,
     file_stem: &str,
-) -> Option<(String, Node<'tree>)> {
+) -> Option<(String, Option<Node<'tree>>, Node<'tree>)> {
     fn search_node<'tree>(
         node: Node<'tree>,
         text: &str,
         file_stem: &str,
-    ) -> Option<(String, Node<'tree>)> {
+    ) -> Option<(String, Option<Node<'tree>>, Node<'tree>)> {
         for child in node.children(&mut node.walk()) {
             if child.kind() == "update_expression" {
                 let mut has_new_slot = false;
                 let mut identifier_name = None;
+                let mut identifier_node = None;
                 let mut table_node = None;
 
                 for n in child.children(&mut child.walk()) {
@@ -613,6 +649,7 @@ fn find_global_table<'tree>(
                         "<-" => has_new_slot = true,
                         "identifier" | "deref_expression" if identifier_name.is_none() => {
                             identifier_name = helpers::extract_identifier_name(n, text);
+                            identifier_node = helpers::find_last_identifier(n);
                         },
                         "table" => table_node = Some(n),
                         _ => {},
@@ -624,7 +661,7 @@ fn find_global_table<'tree>(
                     && let Some(table) = table_node
                     && name == file_stem
                 {
-                    return Some((name, table));
+                    return Some((name, identifier_node, table));
                 }
             } else if child.kind() == "ERROR" {
                 // Search inside ERROR nodes for partial parse results (BB syntax extensions)
@@ -641,6 +678,7 @@ fn find_global_table<'tree>(
         // Look for identifier <- table pattern directly in ERROR children
         let mut has_new_slot = false;
         let mut identifier_name = None;
+        let mut identifier_node = None;
         let mut table_node = None;
 
         for child in root.children(&mut root.walk()) {
@@ -648,12 +686,11 @@ fn find_global_table<'tree>(
                 "<-" => has_new_slot = true,
                 "identifier" if identifier_name.is_none() => {
                     identifier_name = Some(get_node_text(child, text).to_string());
+                    identifier_node = Some(child);
                 },
-                "table" | "{" => {
-                    // When parsing fails, the table might just be "{"
-                    if table_node.is_none() {
-                        table_node = Some(child);
-                    }
+                // When parsing fails, the table might just be "{"
+                "table" | "{" if table_node.is_none() => {
+                    table_node = Some(child);
                 },
                 _ => {},
             }
@@ -665,11 +702,21 @@ fn find_global_table<'tree>(
             && name == file_stem
         {
             // For ERROR nodes, we can't extract members properly, but we can at least index the file
-            return Some((name, root));
+            return Some((name, identifier_node, root));
         }
     }
 
     search_node(root, text, file_stem)
+}
+
+/// Line/column of a node, defaulting to the start of the file.
+fn node_position(node: Option<Node>) -> (u32, u32) {
+    node.map_or((0, 0), |n| {
+        (
+            n.start_position().row as u32,
+            n.start_position().column as u32,
+        )
+    })
 }
 
 /// Extract members from a table node

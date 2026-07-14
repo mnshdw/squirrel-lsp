@@ -104,16 +104,17 @@ pub fn extract_identifier_name(node: Node, text: &str) -> Option<String> {
 ///
 /// For `identifier` nodes, returns the node itself.
 /// For `deref_expression` nodes (like `this.foo.bar`), returns the last identifier node.
+/// For `global_variable` nodes (like `::inherit`), returns the identifier after the `::`.
 /// Recursively handles nested deref_expressions.
 pub fn find_last_identifier(node: Node) -> Option<Node> {
     match node.kind() {
         "identifier" => Some(node),
-        "deref_expression" => {
+        "deref_expression" | "global_variable" => {
             let mut last = None;
             for child in node.children(&mut node.walk()) {
                 if child.kind() == "identifier" {
                     last = Some(child);
-                } else if child.kind() == "deref_expression"
+                } else if matches!(child.kind(), "deref_expression" | "global_variable")
                     && let Some(deeper) = find_last_identifier(child)
                 {
                     last = Some(deeper);

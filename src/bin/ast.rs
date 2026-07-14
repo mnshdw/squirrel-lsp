@@ -12,7 +12,7 @@ fn print_tree(node: Node, source: &str, depth: usize, show_text: bool) {
 
     let display_text = if show_text {
         if text.len() > 60 {
-            format!(" | {}...", &text[..60].replace('\n', "\\n"))
+            format!(" | {}...", text[..60].replace('\n', "\\n"))
         } else {
             format!(" | {}", text.replace('\n', "\\n"))
         }
