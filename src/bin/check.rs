@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use squirrel_lsp::bb_support::{analyze_hooks, analyze_inheritance};
 use squirrel_lsp::symbol_resolver::{
     collect_unresolved_identifiers, compute_symbol_diagnostics_with_globals,
 };
@@ -10,7 +11,7 @@ use squirrel_lsp::syntax_analyzer::compute_syntax_diagnostics;
 use squirrel_lsp::workspace::Workspace;
 use tower_lsp::lsp_types::DiagnosticSeverity;
 
-fn check_file(path: &Path, globals: &HashSet<String>) -> (usize, usize) {
+fn check_file(path: &Path, globals: &HashSet<String>, workspace: &Workspace) -> (usize, usize) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -57,6 +58,46 @@ fn check_file(path: &Path, globals: &HashSet<String>) -> (usize, usize) {
                 _ => {
                     // Skip hints
                 },
+            }
+        }
+    }
+
+    // Hook diagnostics (method validation on mods_hook* callbacks)
+    if let Ok(diags) = analyze_hooks(&source, workspace) {
+        for diag in diags {
+            let severity = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+            let line = diag.range.start.line + 1;
+            let col = diag.range.start.character + 1;
+            match severity {
+                DiagnosticSeverity::ERROR => {
+                    println!("{}:{}:{}: error: {}", file_path, line, col, diag.message);
+                    errors += 1;
+                },
+                DiagnosticSeverity::WARNING => {
+                    println!("{}:{}:{}: warning: {}", file_path, line, col, diag.message);
+                    warnings += 1;
+                },
+                _ => {},
+            }
+        }
+    }
+
+    // Inheritance diagnostics (validates parent paths and detects cycles)
+    if let Ok(diags) = analyze_inheritance(&source, workspace) {
+        for diag in diags {
+            let severity = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+            let line = diag.range.start.line + 1;
+            let col = diag.range.start.character + 1;
+            match severity {
+                DiagnosticSeverity::ERROR => {
+                    println!("{}:{}:{}: error: {}", file_path, line, col, diag.message);
+                    errors += 1;
+                },
+                DiagnosticSeverity::WARNING => {
+                    println!("{}:{}:{}: warning: {}", file_path, line, col, diag.message);
+                    warnings += 1;
+                },
+                _ => {},
             }
         }
     }
@@ -121,7 +162,7 @@ fn main() {
     let mut total_warnings = 0;
 
     for file in &files {
-        let (e, w) = check_file(file, globals);
+        let (e, w) = check_file(file, globals, &workspace);
         total_errors += e;
         total_warnings += w;
     }
