@@ -76,6 +76,11 @@ pub struct Workspace {
     unresolved: HashMap<String, HashMap<String, usize>>,
     /// Identifier -> how many times the whole workspace references it unresolved
     unresolved_totals: HashMap<String, usize>,
+    /// File key -> names that file binds as a local/parameter/loop/catch variable
+    declared_locals: HashMap<String, HashSet<String>>,
+    /// Name -> how many files bind it as a local. A name declared anywhere is a real variable,
+    /// so an undeclared use of it is likely a bug and not a host global.
+    declared_local_totals: HashMap<String, usize>,
     /// `globals`, plus the bindings inferred from `unresolved_totals`
     known_globals: HashSet<String>,
     /// Workspace folders, used to make file paths relative before keying them
@@ -184,16 +189,46 @@ impl Workspace {
         self.unresolved.insert(key, counts);
     }
 
+    /// Record the names `file_path` binds as a local, parameter, loop or catch variable.
+    pub fn set_declared_locals(&mut self, file_path: &Path, names: &[String]) {
+        let key = self.script_path_for(file_path);
+        if key.is_empty() {
+            return;
+        }
+
+        // Withdraw the previous contribution first, so re-indexing does not double-count.
+        if let Some(previous) = self.declared_locals.remove(&key) {
+            for name in previous {
+                if let Some(total) = self.declared_local_totals.get_mut(&name) {
+                    *total = total.saturating_sub(1);
+                    if *total == 0 {
+                        self.declared_local_totals.remove(&name);
+                    }
+                }
+            }
+        }
+
+        let set: HashSet<String> = names.iter().cloned().collect();
+        for name in &set {
+            *self.declared_local_totals.entry(name.clone()).or_default() += 1;
+        }
+        self.declared_locals.insert(key, set);
+    }
+
     /// Recompute the set of identifiers the resolver considers as known.
     pub fn infer_host_globals(&mut self) {
-        self.known_globals = self.globals.clone();
+        let inferred: Vec<String> = self
+            .unresolved_totals
+            .iter()
+            .filter(|(name, total)| {
+                let declared = self.declared_local_totals.get(*name).copied().unwrap_or(0);
+                **total >= HOST_GLOBAL_MIN_REFERENCES && declared < **total
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
 
-        self.known_globals.extend(
-            self.unresolved_totals
-                .iter()
-                .filter(|(_, total)| **total >= HOST_GLOBAL_MIN_REFERENCES)
-                .map(|(name, _)| name.clone()),
-        );
+        self.known_globals = self.globals.clone();
+        self.known_globals.extend(inferred);
     }
 
     /// Get all members of a script, including inherited ones.

@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use squirrel_lsp::symbol_resolver::{
-    collect_unresolved_identifiers, compute_symbol_diagnostics_with_globals,
-};
+use squirrel_lsp::symbol_resolver::{compute_symbol_diagnostics_with_globals, scan_file_bindings};
 use squirrel_lsp::workspace::Workspace;
 
 fn index(root: &str, files: &[(&str, &str)]) -> Workspace {
@@ -14,8 +12,9 @@ fn index(root: &str, files: &[(&str, &str)]) -> Workspace {
     workspace.build_inheritance_graph();
 
     for (path, source) in files {
-        let unresolved = collect_unresolved_identifiers(path, source, workspace.globals()).unwrap();
-        workspace.set_unresolved(Path::new(path), &unresolved);
+        let bindings = scan_file_bindings(path, source, workspace.globals()).unwrap();
+        workspace.set_unresolved(Path::new(path), &bindings.unresolved);
+        workspace.set_declared_locals(Path::new(path), &bindings.declared_locals);
     }
     workspace.infer_host_globals();
 
@@ -103,6 +102,67 @@ fn test_a_single_use_of_an_unknown_name_is_still_reported() {
 
     assert_eq!(found.len(), 1, "got: {found:?}");
     assert!(found[0].contains("someTypoOnlyWrittenOnce"));
+}
+
+#[test]
+fn test_a_leaked_local_is_not_mistaken_for_a_host_global() {
+    let declares_a = r#"
+        function pickA() {
+            local targets = [1, 2, 3];
+            return targets[0];
+        }
+    "#;
+    let declares_b = r#"
+        function pickB() {
+            local targets = getEnemies();
+            return targets.len();
+        }
+    "#;
+    let leak = r#"
+        function pickC() {
+            return targets[0];
+        }
+    "#;
+
+    let workspace = index(
+        "/ws",
+        &[
+            ("/ws/a.nut", declares_a),
+            ("/ws/b.nut", declares_b),
+            ("/ws/c.nut", leak),
+        ],
+    );
+
+    assert!(
+        !workspace.known_globals().contains("targets"),
+        "'targets' is a local of the codebase, so it must not be inferred as a host global"
+    );
+    assert_eq!(
+        undeclared(&workspace, "/ws/c.nut", leak),
+        vec!["Undeclared variable 'targets'".to_string()],
+        "the leaked use must still be reported"
+    );
+}
+
+#[test]
+fn test_a_pervasive_bare_name_stays_a_host_global() {
+    let uses: Vec<(String, String)> = (0..8)
+        .map(|i| {
+            (
+                format!("/ws/u{i}.nut"),
+                "class C { function f() { return m.value; } }".to_string(),
+            )
+        })
+        .collect();
+    let mut files: Vec<(&str, &str)> = uses.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+    files.push(("/ws/odd.nut", "function g() { local m = 1; return m; }"));
+
+    let workspace = index("/ws", &files);
+
+    assert!(
+        workspace.known_globals().contains("m"),
+        "'m' is referenced bare far more than it is declared, so it stays an inferred binding"
+    );
 }
 
 /// Battle Brothers refers to one file by two different partial paths, with and without the `scripts/`

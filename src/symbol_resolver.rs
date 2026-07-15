@@ -176,6 +176,7 @@ pub struct SymbolResolver<'a> {
     file_symbols: FileSymbols,
     known_globals: Option<&'a HashSet<String>>,
     unresolved: Vec<String>,
+    declared_locals: HashSet<String>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -188,6 +189,7 @@ impl<'a> SymbolResolver<'a> {
             file_symbols: FileSymbols::default(),
             known_globals: None,
             unresolved: Vec::new(),
+            declared_locals: HashSet::new(),
             diagnostics: Vec::new(),
         })
     }
@@ -203,17 +205,13 @@ impl<'a> SymbolResolver<'a> {
             file_symbols: FileSymbols::default(),
             known_globals: Some(globals),
             unresolved: Vec::new(),
+            declared_locals: HashSet::new(),
             diagnostics: Vec::new(),
         })
     }
 
     pub fn analyze(self) -> Result<Vec<Diagnostic>, AnalysisError> {
         Ok(self.run()?.diagnostics)
-    }
-
-    /// The identifiers this file references that nothing declares.
-    pub fn analyze_unresolved(self) -> Result<Vec<String>, AnalysisError> {
-        Ok(self.run()?.unresolved)
     }
 
     fn run(mut self) -> Result<Self, AnalysisError> {
@@ -344,6 +342,7 @@ impl<'a> SymbolResolver<'a> {
 
     fn report_unused_variables(&mut self, ctx: &ResolverContext) {
         for decl in &ctx.declarations {
+            self.declared_locals.insert(decl.name.clone());
             if decl.name.starts_with('_') {
                 continue;
             }
@@ -1020,14 +1019,26 @@ pub fn compute_symbol_diagnostics_with_globals(
     resolver.analyze()
 }
 
-/// The identifiers `text` references that are neither local, nor built in, nor present in `globals`.
-pub fn collect_unresolved_identifiers(
+/// What one file contributes to workspace-wide binding inference.
+#[derive(Default)]
+pub struct FileBindings {
+    /// Identifiers referenced but neither local / built in / in `globals`.
+    pub unresolved: Vec<String>,
+    /// Names bound as a local, parameter, loop or catch variable in this file.
+    pub declared_locals: Vec<String>,
+}
+
+/// Scan a file for both its unresolved references and the names it binds locally, in one parse.
+pub fn scan_file_bindings(
     file_path: &str,
     text: &str,
     globals: &HashSet<String>,
-) -> Result<Vec<String>, AnalysisError> {
-    let resolver = SymbolResolver::with_globals(file_path, text, globals)?;
-    resolver.analyze_unresolved()
+) -> Result<FileBindings, AnalysisError> {
+    let resolver = SymbolResolver::with_globals(file_path, text, globals)?.run()?;
+    Ok(FileBindings {
+        unresolved: resolver.unresolved,
+        declared_locals: resolver.declared_locals.into_iter().collect(),
+    })
 }
 
 #[cfg(test)]

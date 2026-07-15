@@ -18,7 +18,7 @@ use std::sync::Arc;
 use bb_support::{analyze_hooks, analyze_inheritance};
 use code_actions::generate_code_actions;
 use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
-use symbol_resolver::{collect_unresolved_identifiers, compute_symbol_diagnostics_with_globals};
+use symbol_resolver::{compute_symbol_diagnostics_with_globals, scan_file_bindings};
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
@@ -137,14 +137,12 @@ impl Backend {
                 continue;
             };
 
-            let unresolved = collect_unresolved_identifiers(
-                &file_path.to_string_lossy(),
-                &content,
-                workspace.globals(),
-            )
-            .unwrap_or_default();
+            let bindings =
+                scan_file_bindings(&file_path.to_string_lossy(), &content, workspace.globals())
+                    .unwrap_or_default();
 
-            workspace.set_unresolved(file_path, &unresolved);
+            workspace.set_unresolved(file_path, &bindings.unresolved);
+            workspace.set_declared_locals(file_path, &bindings.declared_locals);
         }
 
         // Whatever is left over and used more than once is the env API, not a typo (hopefully).
@@ -182,10 +180,10 @@ impl Backend {
         let _ = workspace.index_file(path, text);
         workspace.build_inheritance_graph();
 
-        let unresolved =
-            collect_unresolved_identifiers(&path.to_string_lossy(), text, workspace.globals())
-                .unwrap_or_default();
-        workspace.set_unresolved(path, &unresolved);
+        let bindings = scan_file_bindings(&path.to_string_lossy(), text, workspace.globals())
+            .unwrap_or_default();
+        workspace.set_unresolved(path, &bindings.unresolved);
+        workspace.set_declared_locals(path, &bindings.declared_locals);
 
         workspace.infer_host_globals();
     }

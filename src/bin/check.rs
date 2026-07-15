@@ -4,9 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use squirrel_lsp::bb_support::{analyze_hooks, analyze_inheritance};
-use squirrel_lsp::symbol_resolver::{
-    collect_unresolved_identifiers, compute_symbol_diagnostics_with_globals,
-};
+use squirrel_lsp::symbol_resolver::{compute_symbol_diagnostics_with_globals, scan_file_bindings};
 use squirrel_lsp::syntax_analyzer::compute_syntax_diagnostics;
 use squirrel_lsp::workspace::Workspace;
 use tower_lsp::lsp_types::DiagnosticSeverity;
@@ -150,10 +148,11 @@ fn main() {
         let Ok(source) = fs::read_to_string(file) else {
             continue;
         };
-        let unresolved =
-            collect_unresolved_identifiers(&file.to_string_lossy(), &source, workspace.globals())
+        let bindings =
+            scan_file_bindings(&file.to_string_lossy(), &source, workspace.globals())
                 .unwrap_or_default();
-        workspace.set_unresolved(file, &unresolved);
+        workspace.set_unresolved(file, &bindings.unresolved);
+        workspace.set_declared_locals(file, &bindings.declared_locals);
     }
     workspace.infer_host_globals();
 
