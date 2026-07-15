@@ -1,5 +1,5 @@
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use tree_sitter::Node;
+use tree_sitter::{Node, TreeCursor};
 
 use crate::errors::AnalysisError;
 use crate::helpers;
@@ -23,7 +23,7 @@ pub fn find_inherit_calls<'tree>(root: Node<'tree>, text: &str) -> Vec<InheritCa
         node: Node<'tree>,
         text: &str,
         results: &mut Vec<InheritCall<'tree>>,
-        cursor: &mut tree_sitter::TreeCursor<'tree>,
+        cursor: &mut TreeCursor<'tree>,
     ) {
         if node.kind() == "update_expression" {
             let mut has_new_slot_op = false;
@@ -151,7 +151,7 @@ pub fn find_hook_calls<'tree>(root: Node<'tree>, text: &str) -> Vec<HookCall<'tr
         node: Node<'tree>,
         text: &str,
         results: &mut Vec<HookCall<'tree>>,
-        cursor: &mut tree_sitter::TreeCursor<'tree>,
+        cursor: &mut TreeCursor<'tree>,
     ) {
         if node.kind() == "call_expression"
             && let Some(hook) = parse_hook_call(node, text)
@@ -516,9 +516,9 @@ pub fn find_member_accesses<'tree>(root: Node<'tree>, text: &str) -> Vec<MemberA
         node: Node<'tree>,
         text: &str,
         results: &mut Vec<MemberAccess<'tree>>,
-        cursor: &mut tree_sitter::TreeCursor<'tree>,
+        cursor: &mut TreeCursor<'tree>,
     ) {
-        if node.kind() == "deref_expression" {
+        if node.kind() == "deref_expression" && !is_new_slot_target(node) {
             let mut base = String::new();
             let mut member_name = String::new();
             let mut member_node = None;
@@ -553,6 +553,21 @@ pub fn find_member_accesses<'tree>(root: Node<'tree>, text: &str) -> Vec<MemberA
 
     walk(root, text, &mut results, &mut cursor);
     results
+}
+
+/// Returns true if `node` is the left-hand target of a new-slot operator (`<-`).
+fn is_new_slot_target(node: Node) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if parent.kind() != "update_expression" {
+        return false;
+    }
+    let mut cursor = parent.walk();
+    parent
+        .children(&mut cursor)
+        .find(|child| child.kind() == "<-")
+        .is_some_and(|op| node.end_byte() <= op.start_byte())
 }
 
 pub fn get_node_text<'a>(node: Node, text: &'a str) -> &'a str {
@@ -677,6 +692,66 @@ mod tests {
             .collect();
 
         assert!(!method_errors.is_empty());
+    }
+
+    #[test]
+    fn test_assign_invalid() {
+        let workspace = create_test_workspace();
+        let code = r#"
+            ::mods_hookExactClass("entity/tactical/actor", function(o) {
+                o.canFire = function () {
+                    return true;
+                }
+            });
+        "#;
+
+        let diagnostics = analyze_hooks(code, &workspace).unwrap();
+        let errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors.iter().all(|d| d.message.contains("canFire")))
+    }
+
+    #[test]
+    fn test_new_slot_valid() {
+        let workspace = create_test_workspace();
+        let code = r#"
+            ::mods_hookExactClass("entity/tactical/actor", function(o) {
+                o.canFire <- function () {
+                    return true;
+                }
+            });
+        "#;
+
+        let diagnostics = analyze_hooks(code, &workspace).unwrap();
+        let errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_new_slot_invalid() {
+        let workspace = create_test_workspace();
+        let code = r#"
+            ::mods_hookExactClass("entity/tactical/actor", function(o) {
+                o.cache <- o.missingMethod;
+            });
+        "#;
+
+        let diagnostics = analyze_hooks(code, &workspace).unwrap();
+        let errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors.iter().all(|d| d.message.contains("missingMethod")));
     }
 
     #[test]
