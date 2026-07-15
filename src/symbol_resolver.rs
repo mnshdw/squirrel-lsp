@@ -959,6 +959,12 @@ impl<'a> SymbolResolver<'a> {
                     names.push(child);
                     expect_decl_name = false;
                 },
+                // `local function foo(...)` / `local class foo {...}`
+                "function_declaration" | "class_declaration" => {
+                    if let Some(ident) = self.find_first_identifier(child) {
+                        names.push(ident);
+                    }
+                },
                 _ => {},
             }
         }
@@ -1055,6 +1061,24 @@ mod tests {
         "#;
         let diagnostics = compute_symbol_diagnostics("test.nut", code).unwrap();
         assert!(diagnostics.is_empty(), "Got: {:?}", diagnostics);
+    }
+
+    #[test]
+    fn test_local_function_scopes_params_and_binds_name() {
+        let code = r#"
+            function outer() {
+                local function queryTile(_tile, _info) {
+                    return _tile.IsEmpty || _info.x;
+                }
+                return queryTile(null, null);
+            }
+        "#;
+        let undeclared: Vec<_> = compute_symbol_diagnostics("test.nut", code)
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.message.contains("Undeclared"))
+            .collect();
+        assert!(undeclared.is_empty(), "Got: {undeclared:?}");
     }
 
     #[test]
