@@ -244,8 +244,19 @@ impl<'a> Formatter<'a> {
             && !self.output.is_empty()
             && !matches!(token.kind, TokenKind::Comment | TokenKind::Blankline)
         {
+            self.end_statement();
             self.close_synthetic_blocks(Some(token));
             self.push_newline();
+        }
+
+        // A comment between two statements is (in theory) not part of either, so the state the
+        // previous statement left behind (a ternary indent) must not indent it.
+        if token.kind == TokenKind::Comment
+            && token.preceded_by_newline
+            && Self::next_non_comment(remaining)
+                .is_some_and(|t| t.starts_statement && t.preceded_by_newline)
+        {
+            self.end_statement();
         }
 
         // A blank line after the statement of a single-statement block belongs after the
@@ -285,10 +296,11 @@ impl<'a> Formatter<'a> {
             "++" | "--" => self.write_increment(token),
             "else" if token.kind == TokenKind::Keyword => self.write_else(token, remaining),
             _ if token.kind == TokenKind::Comment => self.write_comment(token),
-            _ if token.kind == TokenKind::Blankline => self.write_blankline(),
+            _ if token.kind == TokenKind::Blankline => self.write_blankline(next),
             _ if token.kind != TokenKind::String && is_operator(token.text.as_str()) => {
                 self.write_operator(token, remaining)
             },
+            _ if self.is_binary_signed_number(token) => self.write_signed_number(token),
             _ => self.write_default(token),
         }
     }
@@ -303,7 +315,7 @@ impl<'a> Formatter<'a> {
     /// Check if a token is an inline comment (not preceded by newline)
     fn is_inline_comment(token: &Token) -> bool {
         token.kind == TokenKind::Comment
-            && token.text.trim_start().starts_with("//")
+            && is_line_comment(token.text.trim_start())
             && !token.preceded_by_newline
     }
 
@@ -567,15 +579,7 @@ impl<'a> Formatter<'a> {
         self.apply_pending_space();
         self.output.push(';');
 
-        // Reset operator breaking state (statement ended)
-        self.breaking_logical_at_depth = None;
-        self.breaking_concat_at_depth = None;
-
-        // If we're in a multiline ternary, dedent back
-        if !self.ternaries.is_empty() {
-            self.indent_level = self.indent_level.saturating_sub(1);
-            self.ternaries.pop();
-        }
+        self.end_statement();
 
         // If a line comment follows on the same line (not preceded by newline),
         // keep it on the same line.
@@ -632,7 +636,7 @@ impl<'a> Formatter<'a> {
 
         if in_object_top_level && !in_function_params {
             match next {
-                Some(t) if t.text.as_str() == "function" => self.write_blankline(),
+                Some(t) if t.text.as_str() == "function" => self.write_blankline(next),
                 _ => self.push_newline(),
             }
         } else if in_multiline_call {
@@ -1185,7 +1189,14 @@ impl<'a> Formatter<'a> {
         let text = token.text.replace("\r\n", "\n");
         let trimmed_text = text.trim_start();
 
-        if trimmed_text.starts_with("//") {
+        // A comment the source put on its own line stays on its own line. The statement
+        // before it may have ended on a newline (rather than a ;) in which case nothing
+        // has broken the line yet.
+        if token.preceded_by_newline && !self.output.is_empty() && !self.output.ends_with('\n') {
+            self.push_newline();
+        }
+
+        if is_line_comment(trimmed_text) {
             if !self.output.is_empty() && !self.output.ends_with('\n') {
                 // Inline comment after code - preserve alignment whitespace
                 let spacing: String = token
@@ -1229,8 +1240,15 @@ impl<'a> Formatter<'a> {
             return;
         }
 
+        if self.output.is_empty() || self.output.ends_with('\n') {
+            self.ensure_indent();
+            self.output.push_str(&text);
+            self.set_prev(token);
+            return;
+        }
+
         self.prepare_token(token);
-        if !self.output.ends_with(' ') && !self.output.ends_with('\n') {
+        if !self.output.ends_with(' ') {
             self.output.push(' ');
         }
         self.output.push_str(&text);
@@ -1241,6 +1259,37 @@ impl<'a> Formatter<'a> {
         self.prepare_token(token);
         self.output.push_str(&token.text);
         self.set_prev(token);
+    }
+
+    /// `a -4` sadly lexes the sign into the number, so what the source means as a subtraction
+    /// arrives as a single Number token, we use the operand before to tell them apart.
+    fn is_binary_signed_number(&self, token: &Token) -> bool {
+        token.kind == TokenKind::Number
+            && token.text.len() > 1
+            && token.text.starts_with(['-', '+'])
+            && !is_unary_context(self.prev())
+    }
+
+    fn write_signed_number(&mut self, token: &Token) {
+        let (sign, magnitude) = token.text.split_at(1);
+
+        self.ensure_indent();
+        self.apply_pending_space();
+        if !self.ends_with_whitespace() {
+            self.output.push(' ');
+        }
+        self.output.push_str(sign);
+        self.output.push(' ');
+        self.output.push_str(magnitude);
+        self.set_prev(token);
+    }
+
+    fn end_statement(&mut self) {
+        self.breaking_logical_at_depth = None;
+        self.breaking_concat_at_depth = None;
+        while self.ternaries.pop().is_some() {
+            self.indent_level = self.indent_level.saturating_sub(1);
+        }
     }
 
     fn write_else(&mut self, token: &Token, remaining: &[Token]) {
@@ -1297,9 +1346,11 @@ impl<'a> Formatter<'a> {
         self.set_prev(token);
     }
 
-    fn write_blankline(&mut self) {
-        // Skip blank lines inside array literals
-        if !self.brackets.is_empty() {
+    fn write_blankline(&mut self, next: Option<&Token>) {
+        // Blank lines between array elements are dropped as noise, but one that sets off a
+        // commented group of elements is what makes the group readable.
+        let separates_comment = next.is_some_and(|t| t.kind == TokenKind::Comment);
+        if !self.brackets.is_empty() && !separates_comment {
             return;
         }
         if self.output.ends_with("\n\n") {
@@ -1492,6 +1543,12 @@ impl<'a> Formatter<'a> {
     }
 }
 
+/// A comment that runs to the end of its line. Squirrel accepts both forms, and whatever
+/// follows one has to be written on the next line or the code ends up commented out.
+fn is_line_comment(trimmed_text: &str) -> bool {
+    trimmed_text.starts_with("//") || trimmed_text.starts_with('#')
+}
+
 fn trim_trailing_whitespace(buffer: &mut String) {
     while matches!(buffer.chars().last(), Some(' ') | Some('\t') | Some('\r')) {
         buffer.pop();
@@ -1596,6 +1653,8 @@ fn starts_statement(leaf: Node) -> bool {
 
         let starts_one = match parent.kind() {
             "script" | "block" | "case_statement" | "default_statement" => node.is_named(),
+            // The labels of a switch: each one starts the statement list that follows it
+            "switch_statement" => matches!(node.kind(), "case_statement" | "default_statement"),
             // A table's slots are separated by a ',' or (sadly) a newline
             "table_slots" => node.is_named(),
             // 'class' and the class name also start here, but only members are statements
