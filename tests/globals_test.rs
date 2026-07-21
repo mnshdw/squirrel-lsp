@@ -241,6 +241,59 @@ fn test_native_used_inside_a_class_counts_towards_inference() {
     );
 }
 
+/// Repeating a typo does not make it correct.
+#[test]
+fn test_repeated_typo_is_reported() {
+    let main = r#"
+        function check(_actor) {
+            if (actor.getSkills().hasSkill("trait.witcher")) return 1;
+            if (actor.getFlags().has("mutantPlus")) return 2;
+            return 0;
+        }
+    "#;
+
+    let workspace = index("/ws", &[("/ws/main.nut", main)]);
+
+    assert!(!workspace.known_globals().contains("actor"));
+    assert_eq!(
+        undeclared(&workspace, "/ws/main.nut", main),
+        vec![
+            "Undeclared variable 'actor'".to_string(),
+            "Undeclared variable 'actor'".to_string(),
+        ]
+    );
+}
+
+/// Test a common typo with and without `_` off a variable.
+#[test]
+fn test_underscore_off_variable() {
+    let mutate = r#"
+        function mutatePlayer(_actor, _mutagen) {
+            if (_actor.getSkills().hasSkill("trait.unstable_mutant")) {
+                if (actor.getFlags().has("playerMutantPlus")) return 3;
+            }
+            return 2;
+        }
+    "#;
+    let heal = r#"
+        function healPlayer(_actor) {
+            return actor.getHitpoints();
+        }
+    "#;
+
+    let workspace = index("/ws", &[("/ws/mutate.nut", mutate), ("/ws/heal.nut", heal)]);
+
+    assert!(!workspace.known_globals().contains("actor"));
+    assert_eq!(
+        undeclared(&workspace, "/ws/mutate.nut", mutate),
+        vec!["Undeclared variable 'actor'".to_string()]
+    );
+    assert_eq!(
+        undeclared(&workspace, "/ws/heal.nut", heal),
+        vec!["Undeclared variable 'actor'".to_string()]
+    );
+}
+
 /// A name used only once is still assumed to be a typo, including inside a class.
 #[test]
 fn test_single_use_outside_a_class_is_still_reported() {

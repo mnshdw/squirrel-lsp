@@ -159,6 +159,19 @@ impl ResolverContext {
         }
     }
 
+    /// Whether an in-scope binding differs from `name` only by a leading underscore.
+    ///
+    /// Parameters are `_`-prefixed by convention, so writing `actor` where `_actor` is in scope
+    /// is a slip of the finger, not a reference to something the host bound into the root table.
+    /// Such a name must never be counted towards host-global inference: repeated across a couple
+    /// of files, the same typo would otherwise teach the workspace to accept itself.
+    fn shadows_underscore_variant(&self, name: &str) -> bool {
+        match name.strip_prefix('_') {
+            Some(stripped) => self.locals.contains(stripped),
+            None => self.locals.contains(&format!("_{name}")),
+        }
+    }
+
     fn child(&self) -> Self {
         Self {
             locals: self.locals.clone(),
@@ -774,16 +787,24 @@ impl<'a> SymbolResolver<'a> {
             return;
         }
 
+        // A near-miss on an in-scope `_`-prefixed binding is evidence against the name being a
+        // host global, so it is kept out of the count entirely.
+        let looks_like_typo = ctx.shadows_underscore_variant(name);
+
         // A bare name in a derived class may be a slot it inherited from a base whose members
         // we cannot see, so it is not reported. It is still counted as unresolved: the names
         // the environment binds into the root table are, in a class-based codebase, used mostly
         // from inside class bodies, and it is that count which tells them apart from a typo.
         if ctx.has_inherited_members {
-            self.unresolved.push(name.to_string());
+            if !looks_like_typo {
+                self.unresolved.push(name.to_string());
+            }
             return;
         }
 
-        self.unresolved.push(name.to_string());
+        if !looks_like_typo {
+            self.unresolved.push(name.to_string());
+        }
 
         let start = self.position_at(node.start_byte());
         let end = self.position_at(node.end_byte());

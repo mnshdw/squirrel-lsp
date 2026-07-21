@@ -13,9 +13,9 @@ use crate::errors::AnalysisError;
 use crate::helpers;
 
 /// An identifier defined nowhere in the workspace is assumed to be declared by the host env
-/// once it is referenced at least this many times. A typo is written once (usually), but a binding
+/// once at least this many *files* reference it. A typo is written once (usually), but a binding
 /// like like `require` or `Const` gets used many times.
-const HOST_GLOBAL_MIN_REFERENCES: usize = 2;
+const HOST_GLOBAL_MIN_FILES: usize = 2;
 
 /// Information about a class member (method or field)
 #[derive(Debug, Clone)]
@@ -73,8 +73,8 @@ pub struct Workspace {
     /// Global identifiers defined across all files
     globals: HashSet<String>,
     /// File key -> identifiers that file references but nothing defines
-    unresolved: HashMap<String, HashMap<String, usize>>,
-    /// Identifier -> how many times the whole workspace references it unresolved
+    unresolved: HashMap<String, HashSet<String>>,
+    /// Identifier -> how many files reference it unresolved
     unresolved_totals: HashMap<String, usize>,
     /// File key -> names that file binds as a local/parameter/loop/catch variable
     declared_locals: HashMap<String, HashSet<String>>,
@@ -168,9 +168,9 @@ impl Workspace {
         // Withdraw whatever this file contributed previously, so re-indexing a file on does not
         // change the totals.
         if let Some(previous) = self.unresolved.remove(&key) {
-            for (name, count) in previous {
+            for name in previous {
                 if let Some(total) = self.unresolved_totals.get_mut(&name) {
-                    *total = total.saturating_sub(count);
+                    *total = total.saturating_sub(1);
                     if *total == 0 {
                         self.unresolved_totals.remove(&name);
                     }
@@ -178,15 +178,12 @@ impl Workspace {
             }
         }
 
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for name in names {
-            *counts.entry(name.clone()).or_default() += 1;
-        }
-        for (name, count) in &counts {
-            *self.unresolved_totals.entry(name.clone()).or_default() += count;
+        let set: HashSet<String> = names.iter().cloned().collect();
+        for name in &set {
+            *self.unresolved_totals.entry(name.clone()).or_default() += 1;
         }
 
-        self.unresolved.insert(key, counts);
+        self.unresolved.insert(key, set);
     }
 
     /// Record the names `file_path` binds as a local, parameter, loop or catch variable.
@@ -222,7 +219,7 @@ impl Workspace {
             .iter()
             .filter(|(name, total)| {
                 let declared = self.declared_local_totals.get(*name).copied().unwrap_or(0);
-                **total >= HOST_GLOBAL_MIN_REFERENCES && declared < **total
+                **total >= HOST_GLOBAL_MIN_FILES && declared < **total
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -1032,6 +1029,23 @@ mod tests {
         assert!(workspace.known_globals().contains("Font"));
         // Used once, defined nowhere: still a typo.
         assert!(!workspace.known_globals().contains("typo"));
+    }
+
+    #[test]
+    fn test_repeating_name_within_file_does_not_infer_global() {
+        let mut workspace = ws();
+
+        workspace.set_unresolved(
+            Path::new("/ws/a.nut"),
+            &[
+                "actor".to_string(),
+                "actor".to_string(),
+                "actor".to_string(),
+            ],
+        );
+        workspace.infer_host_globals();
+
+        assert!(!workspace.known_globals().contains("actor"));
     }
 
     #[test]
