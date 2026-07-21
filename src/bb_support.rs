@@ -81,11 +81,10 @@ fn parse_inherit_call<'tree>(
 
     for child in call.children(&mut call.walk()) {
         match child.kind() {
-            "identifier" => {
-                if get_node_text(child, text) == "inherit" {
-                    is_inherit = true;
-                }
+            "identifier" if get_node_text(child, text) == "inherit" => {
+                is_inherit = true;
             },
+            "identifier" => {},
             // `this.inherit(…)` is a deref_expression, but `::inherit(…)` is a global_variable.
             "deref_expression" | "global_variable" => {
                 if let Some(last) = helpers::find_last_identifier(child)
@@ -97,12 +96,11 @@ fn parse_inherit_call<'tree>(
             "call_args" => {
                 for arg in child.children(&mut child.walk()) {
                     match arg.kind() {
-                        "string" => {
-                            if path_node.is_none() {
-                                parent_path = helpers::extract_string_content(arg, text);
-                                path_node = Some(arg);
-                            }
+                        "string" if path_node.is_none() => {
+                            parent_path = helpers::extract_string_content(arg, text);
+                            path_node = Some(arg);
                         },
+                        "string" => {},
                         "table" => {
                             body_node = Some(arg);
                         },

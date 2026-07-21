@@ -315,12 +315,11 @@ impl<'a> SymbolResolver<'a> {
                 self.analyze_catch(node, ctx);
                 return;
             },
-            "call_expression" => {
-                if self.is_inherit_call(node) {
-                    self.analyze_inherit_call(node, ctx);
-                    return;
-                }
+            "call_expression" if self.is_inherit_call(node) => {
+                self.analyze_inherit_call(node, ctx);
+                return;
             },
+            "call_expression" => {},
             "local_declaration" | "var_statement" => {
                 for ident in self.find_all_declaration_names(node) {
                     let name = self.node_text(ident).to_string();
@@ -896,11 +895,10 @@ impl<'a> SymbolResolver<'a> {
     fn is_inherit_call(&self, node: Node) -> bool {
         for child in node.children(&mut node.walk()) {
             match child.kind() {
-                "identifier" => {
-                    if self.node_text(child) == "inherit" {
-                        return true;
-                    }
+                "identifier" if self.node_text(child) == "inherit" => {
+                    return true;
                 },
+                "identifier" => {},
                 "global_variable" => {
                     for subchild in child.children(&mut child.walk()) {
                         if subchild.kind() == "identifier" && self.node_text(subchild) == "inherit"

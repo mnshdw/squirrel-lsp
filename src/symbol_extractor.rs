@@ -277,11 +277,10 @@ fn extract_inherit_call<'a>(node: Node<'a>, text: &str) -> Option<(String, Optio
 
     for child in node.children(&mut node.walk()) {
         match child.kind() {
-            "identifier" => {
-                if helpers::node_text(child, text) == "inherit" {
-                    is_inherit = true;
-                }
+            "identifier" if helpers::node_text(child, text) == "inherit" => {
+                is_inherit = true;
             },
+            "identifier" => {},
             "deref_expression" | "global_variable" => {
                 if let Some(last) = helpers::find_last_identifier(child)
                     && helpers::node_text(last, text) == "inherit"
@@ -292,11 +291,10 @@ fn extract_inherit_call<'a>(node: Node<'a>, text: &str) -> Option<(String, Optio
             "call_args" => {
                 for arg in child.children(&mut child.walk()) {
                     match arg.kind() {
-                        "string" => {
-                            if parent_path.is_none() {
-                                parent_path = Some(helpers::extract_string_content(arg, text));
-                            }
+                        "string" if parent_path.is_none() => {
+                            parent_path = Some(helpers::extract_string_content(arg, text));
                         },
+                        "string" => {},
                         "table" => {
                             body_node = Some(arg);
                         },
