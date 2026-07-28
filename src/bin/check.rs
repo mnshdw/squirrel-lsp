@@ -148,9 +148,8 @@ fn main() {
         let Ok(source) = fs::read_to_string(file) else {
             continue;
         };
-        let bindings =
-            scan_file_bindings(&file.to_string_lossy(), &source, workspace.globals())
-                .unwrap_or_default();
+        let bindings = scan_file_bindings(&file.to_string_lossy(), &source, workspace.globals())
+            .unwrap_or_default();
         workspace.set_unresolved(file, &bindings.unresolved);
         workspace.set_declared_locals(file, &bindings.declared_locals);
     }

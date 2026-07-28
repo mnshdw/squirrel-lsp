@@ -461,10 +461,11 @@ impl LanguageServer for Backend {
         let file_path = uri.to_file_path().unwrap_or_default();
         let workspace = self.workspace.read().await;
 
-        let locations: Vec<_> = navigation::find_definitions(&text, position, &file_path, &workspace)
-            .into_iter()
-            .filter_map(navigation::definition_to_location)
-            .collect();
+        let locations: Vec<_> =
+            navigation::find_definitions(&text, position, &file_path, &workspace)
+                .into_iter()
+                .filter_map(navigation::definition_to_location)
+                .collect();
 
         match locations.len() {
             0 => Ok(None),
