@@ -11,9 +11,7 @@ import {
 let client: LanguageClient | undefined;
 let clientLog: vscode.OutputChannel | undefined;
 
-export async function activate(
-  context: vscode.ExtensionContext
-): Promise<void> {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   clientLog = vscode.window.createOutputChannel("Squirrel LSP (client)");
   context.subscriptions.push(clientLog);
   clientLog.appendLine("Activating Squirrel LSP client...");
@@ -22,7 +20,7 @@ export async function activate(
     vscode.commands.registerCommand("squirrel-lsp.restartServer", async () => {
       clientLog?.appendLine("Restart command invoked");
       await restartClient(context);
-    })
+    }),
   );
 
   await startClient(context);
@@ -55,9 +53,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   }
 
   clientLog?.appendLine(
-    `Using server command: ${executable.command} ${
-      executable.args?.join(" ") ?? ""
-    }`
+    `Using server command: ${executable.command} ${executable.args?.join(" ") ?? ""}`,
   );
 
   const debugExecutable: Executable = {
@@ -79,7 +75,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     "squirrelLanguageServer",
     "Squirrel Language Server",
     serverOptions,
-    clientOptions
+    clientOptions,
   );
 
   client.onDidChangeState((event) => {
@@ -99,7 +95,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
 }
 
 async function resolveServerExecutable(
-  context: vscode.ExtensionContext
+  context: vscode.ExtensionContext,
 ): Promise<Executable | undefined> {
   const config = vscode.workspace.getConfiguration("squirrelLsp");
   const configuredPath = config.get<string>("serverPath");
@@ -123,16 +119,12 @@ async function resolveServerExecutable(
     candidates.push(workspaceBinary);
   }
 
-  const defaultCommand =
-    process.platform === "win32" ? "squirrel-lsp.exe" : "squirrel-lsp";
+  const defaultCommand = process.platform === "win32" ? "squirrel-lsp.exe" : "squirrel-lsp";
   clientLog?.appendLine(`Adding default command candidate: ${defaultCommand}`);
   candidates.push(defaultCommand);
 
   for (const candidate of candidates) {
-    const executable = await normalizeCandidate(
-      candidate,
-      context.extensionPath
-    );
+    const executable = await normalizeCandidate(candidate, context.extensionPath);
     if (executable) {
       clientLog?.appendLine(`Resolved executable: ${executable.command}`);
       return executable;
@@ -141,7 +133,7 @@ async function resolveServerExecutable(
   }
 
   vscode.window.showErrorMessage(
-    "Could not locate the squirrel-lsp executable. Set `squirrelLsp.serverPath` to the compiled binary."
+    "Could not locate the squirrel-lsp executable. Set `squirrelLsp.serverPath` to the compiled binary.",
   );
   return undefined;
 }
@@ -153,12 +145,7 @@ function findWorkspaceBinary(): string | undefined {
   }
 
   const root = folders[0].uri.fsPath;
-  const releasePath = path.join(
-    root,
-    "target",
-    "release",
-    platformBinaryName()
-  );
+  const releasePath = path.join(root, "target", "release", platformBinaryName());
   if (fs.existsSync(releasePath)) {
     return releasePath;
   }
@@ -184,9 +171,7 @@ function platformKey(): string {
   return `${plat}-x64`;
 }
 
-function resolveBundledServerPath(
-  context: vscode.ExtensionContext
-): string | null {
+function resolveBundledServerPath(context: vscode.ExtensionContext): string | null {
   const binDir = path.join(context.extensionPath, "bin", platformKey());
   const bin = path.join(binDir, platformBinaryName());
   if (fs.existsSync(bin)) {
@@ -204,13 +189,11 @@ function resolveBundledServerPath(
 
 async function normalizeCandidate(
   candidate: string,
-  extensionPath: string
+  extensionPath: string,
 ): Promise<Executable | undefined> {
   const trimmed = candidate.trim();
 
-  const resolved = path.isAbsolute(trimmed)
-    ? trimmed
-    : path.join(extensionPath, trimmed);
+  const resolved = path.isAbsolute(trimmed) ? trimmed : path.join(extensionPath, trimmed);
 
   if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
     clientLog?.appendLine(`Candidate exists at ${resolved}`);
