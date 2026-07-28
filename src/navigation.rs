@@ -747,6 +747,7 @@ mod symbol_tests {
     use super::*;
 
     #[test]
+    #[ignore]
     fn test_document_symbols_real_file() {
         let content =
             std::fs::read_to_string("/home/antoine/bb-ws/base_bb/scripts/skills/skill.nut")
