@@ -1474,7 +1474,7 @@ impl<'a> Formatter<'a> {
         let mut length = 0;
         let mut prev_text = "";
 
-        for token in remaining {
+        for token in statement_slice(remaining) {
             if matches!(token.text.as_str(), ";" | "{" | "}") {
                 break;
             }
@@ -1498,7 +1498,7 @@ impl<'a> Formatter<'a> {
         let mut nesting_depth = 0;
         let mut seen_colon = false;
 
-        for token in remaining {
+        for token in statement_slice(remaining) {
             match token.text.as_str() {
                 "?" => ternary_depth += 1,
                 ":" => {
@@ -1541,6 +1541,17 @@ impl<'a> Formatter<'a> {
 
         length
     }
+}
+
+/// The tokens up to the end of the statement `remaining` starts in. Squirrel (sadly) accepts a
+/// newline as a statement separator, so we can't stop only at ';' or we would go into the next
+/// statements and measures them too.
+fn statement_slice(remaining: &[Token]) -> &[Token] {
+    let end = remaining
+        .iter()
+        .position(|t| t.starts_statement && t.preceded_by_newline)
+        .unwrap_or(remaining.len());
+    &remaining[..end]
 }
 
 /// A comment that runs to the end of its line. Squirrel accepts both forms, and whatever
