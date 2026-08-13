@@ -26,7 +26,10 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 			bro.m.HireTime = this.Time.getVirtualTimeF();
 
 			while (names.find(bro.getNameOnly()) != null) {
-				bro.setName(this.Const.Strings.CharacterNames[this.Math.rand(0, this.Const.Strings.CharacterNames.len() - 1)]);
+				bro.setName(this.Const.Strings.CharacterNames[this.Math.rand(
+					0,
+					this.Const.Strings.CharacterNames.len() - 1
+				)]);
 			}
 
 			names.push(bro.getNameOnly());
@@ -96,7 +99,12 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 						local d = s.getTile().getDistanceTo(tile);
 
 						if (d > 6 && d < 15) {
-							local path = this.World.getNavigator().findPath(tile, s.getTile(), navSettings, 0);
+							local path = this.World.getNavigator().findPath(
+								tile,
+								s.getTile(),
+								navSettings,
+								0
+							);
 
 							if (!path.isEmpty()) {
 								next = false;
@@ -115,7 +123,11 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 			}
 		} while (1);
 
-		this.World.State.m.Player = this.World.spawnEntity("scripts/entity/world/player_party", spawnTile.Coords.X, spawnTile.Coords.Y);
+		this.World.State.m.Player = this.World.spawnEntity(
+			"scripts/entity/world/player_party",
+			spawnTile.Coords.X,
+			spawnTile.Coords.Y
+		);
 		this.World.Assets.updateLook(103);
 		this.World.getCamera().setPos(this.World.State.m.Player.getPos());
 		local f = nearestVillage.getFactionOfType(this.Const.FactionType.NobleHouse);
@@ -195,7 +207,12 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 	}
 
 	function onBuildPerkTree(_background) {
-		this.addScenarioPerk(_background, this.Const.Perks.PerkDefs.Pathfinder, 0, _background.isBackgroundType(this.Const.BackgroundType.Druid)
-			|| _background.isBackgroundType(this.Const.BackgroundType.Ranger));
+		this.addScenarioPerk(
+			_background,
+			this.Const.Perks.PerkDefs.Pathfinder,
+			0,
+			_background.isBackgroundType(this.Const.BackgroundType.Druid)
+				|| _background.isBackgroundType(this.Const.BackgroundType.Ranger)
+		);
 	}
 });

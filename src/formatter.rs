@@ -142,6 +142,8 @@ struct ParenContext {
 #[derive(Clone, Copy)]
 struct BracketContext {
     pretty_print: bool,
+    /// True for an array index (foo[x]), false for an array literal ([1, 2, 3]).
+    is_index: bool,
     /// Output position where the '[' was written
     start_output_pos: usize,
 }
@@ -672,7 +674,20 @@ impl<'a> Formatter<'a> {
         let next_breaks_line = remaining
             .first()
             .is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), ")" | "[" | "{"));
-        let should_multiline = next_breaks_line && !matches!(kind, ParenKind::Function);
+
+        // A call that does not fit on one line is split into one argument per line.
+        let is_call = matches!(kind, ParenKind::Regular)
+            && self.prev().is_some_and(|p| {
+                p.kind == TokenKind::Identifier || matches!(p.text.as_str(), ")" | "]")
+            });
+        let args_too_long = is_call
+            && has_top_level_comma(remaining)
+            && !has_block_argument(remaining)
+            && self.get_current_line_length() + self.estimate_paren_content_length(remaining) + 1
+                > self.options.max_width;
+
+        let should_multiline =
+            (next_breaks_line || args_too_long) && !matches!(kind, ParenKind::Function);
         let should_indent = should_multiline && matches!(kind, ParenKind::Regular);
 
         self.parens.push(ParenContext {
@@ -775,20 +790,21 @@ impl<'a> Formatter<'a> {
         self.output.push('[');
         self.bracket_depth += 1;
 
-        // Detect if this is an array subscript (foo[x]) vs array literal ([1, 2, 3])
-        let is_subscript = self.prev().is_some_and(|p| {
+        // Detect if this is an array index (foo[x]) or array literal ([1, 2, 3])
+        let is_index = self.prev().is_some_and(|p| {
             matches!(
                 p.kind,
                 TokenKind::Identifier | TokenKind::Number | TokenKind::String
             ) || matches!(p.text.as_str(), "]" | ")" | "}")
         });
 
-        // Don't pretty-print array subscripts or empty arrays
+        // Don't pretty-print array indexes or empty arrays
         let is_empty = matches!(next.map(|n| n.text.as_str()), Some("]"));
 
-        if is_subscript || is_empty {
+        if is_index || is_empty {
             self.brackets.push(BracketContext {
                 pretty_print: false,
+                is_index,
                 start_output_pos: self.output.len(),
             });
             self.set_prev(token);
@@ -829,6 +845,7 @@ impl<'a> Formatter<'a> {
 
         self.brackets.push(BracketContext {
             pretty_print: should_pretty_print,
+            is_index: false,
             start_output_pos: self.output.len(),
         });
 
@@ -846,6 +863,7 @@ impl<'a> Formatter<'a> {
 
         let ctx = self.brackets.pop();
         let was_pretty = ctx.map(|c| c.pretty_print).unwrap_or(false);
+        let was_index = ctx.is_some_and(|c| c.is_index);
         let start_idx = ctx.map(|c| c.start_output_pos).unwrap_or(self.output.len());
 
         if was_pretty {
@@ -853,7 +871,7 @@ impl<'a> Formatter<'a> {
             if !self.output.ends_with('\n') {
                 self.push_newline();
             }
-        } else {
+        } else if !was_index {
             let had_newline_since_open = self.output[start_idx..].contains('\n');
             if had_newline_since_open && !self.output.ends_with('\n') {
                 self.push_newline();
@@ -1541,6 +1559,46 @@ impl<'a> Formatter<'a> {
 
         length
     }
+}
+
+/// Whether one of the tokens is a table, an array, a function or a lambda.
+fn has_block_argument(tokens: &[Token]) -> bool {
+    let mut depth = 0usize;
+    for token in tokens {
+        if matches!(token.kind, TokenKind::String | TokenKind::Comment) {
+            continue;
+        }
+        if depth == 0
+            && (matches!(token.text.as_str(), "{" | "[" | "@") || token.text == "function")
+        {
+            return true;
+        }
+        match token.text.as_str() {
+            "(" | "[" | "{" => depth += 1,
+            ")" if depth == 0 => return false,
+            ")" | "]" | "}" => depth = depth.saturating_sub(1),
+            _ => {},
+        }
+    }
+    false
+}
+
+/// Whether one of the tokens has a ',' of its own, outside any nested brackets.
+fn has_top_level_comma(tokens: &[Token]) -> bool {
+    let mut depth = 0usize;
+    for token in tokens {
+        if matches!(token.kind, TokenKind::String | TokenKind::Comment) {
+            continue;
+        }
+        match token.text.as_str() {
+            "(" | "[" | "{" => depth += 1,
+            ")" if depth == 0 => return false,
+            ")" | "]" | "}" => depth = depth.saturating_sub(1),
+            "," if depth == 0 => return true,
+            _ => {},
+        }
+    }
+    false
 }
 
 /// The tokens up to the end of the statement `remaining` starts in. Squirrel (sadly) accepts a

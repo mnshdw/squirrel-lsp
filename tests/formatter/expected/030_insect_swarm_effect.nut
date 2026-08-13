@@ -16,7 +16,10 @@
 
 			this.removeSelf();
 		} else {
-			this.m.TurnsLeft = this.Math.max(1, 3 + this.getContainer().getActor().getCurrentProperties().NegativeStatusEffectDuration);
+			this.m.TurnsLeft = this.Math.max(
+				1,
+				3 + this.getContainer().getActor().getCurrentProperties().NegativeStatusEffectDuration
+			);
 			this.Sound.play(this.m.SoundOnUse[this.Math.rand(0, this.m.SoundOnUse.len() - 1)], this.Const.Sound.Volume.Skill, this.getContainer().getActor().getPos());
 			local actor = this.getContainer().getActor();
 			this.addSprite(1, "bust_flies_01");
