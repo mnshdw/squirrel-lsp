@@ -137,6 +137,7 @@ struct ParenContext {
     bracket_depth_at_open: usize,
     multiline: bool,
     indented: bool,
+    vertical: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -690,11 +691,24 @@ impl<'a> Formatter<'a> {
             (next_breaks_line || args_too_long) && !matches!(kind, ParenKind::Function);
         let should_indent = should_multiline && matches!(kind, ParenKind::Regular);
 
+        // `(a || b)` written inside a condition: decide once, here, whether the group fits on
+        // the line it starts on. Every operator in it then follows that decision.
+        let in_condition = self
+            .parens
+            .iter()
+            .any(|f| matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch));
+        let vertical = in_condition
+            && matches!(kind, ParenKind::Regular)
+            && has_top_level_logical_op(remaining)
+            && self.get_current_line_length() + self.estimate_paren_content_length(remaining) + 1
+                > self.options.max_width;
+
         self.parens.push(ParenContext {
             kind,
             bracket_depth_at_open: self.bracket_depth,
             multiline: should_multiline,
             indented: should_indent,
+            vertical,
         });
 
         if should_indent {
@@ -1117,9 +1131,8 @@ impl<'a> Formatter<'a> {
             .iter()
             .any(|f| matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch));
 
-        // Don't break inside nested conditions (e.g., inside `(a || b)` within an if)
         if is_logical_op && inside_any_condition && !at_condition_top_level {
-            return false;
+            return self.parens.last().is_some_and(|f| f.vertical);
         }
 
         true
@@ -1559,6 +1572,24 @@ impl<'a> Formatter<'a> {
 
         length
     }
+}
+
+/// Whether one of the tokens is a '&&' or a '||' outside any nested brackets.
+fn has_top_level_logical_op(tokens: &[Token]) -> bool {
+    let mut depth = 0usize;
+    for token in tokens {
+        if matches!(token.kind, TokenKind::String | TokenKind::Comment) {
+            continue;
+        }
+        match token.text.as_str() {
+            "(" | "[" | "{" => depth += 1,
+            ")" if depth == 0 => return false,
+            ")" | "]" | "}" => depth = depth.saturating_sub(1),
+            "&&" | "||" if depth == 0 => return true,
+            _ => {},
+        }
+    }
+    false
 }
 
 /// Whether one of the tokens is a table, an array, a function or a lambda.
