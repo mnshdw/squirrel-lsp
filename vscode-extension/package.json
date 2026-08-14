@@ -63,6 +63,23 @@
           "default": 100,
           "minimum": 1,
           "description": "Column the formatter wraps at. Takes effect after restarting the server."
+        },
+        "squirrelLsp.lints": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["off", "hint", "information", "warning", "error"]
+          },
+          "properties": {
+            "missing-semicolon": {
+              "type": "string",
+              "enum": ["off", "hint", "information", "warning", "error"],
+              "default": "off",
+              "description": "Report statements that are not terminated by ';'. Style preference."
+            }
+          },
+          "markdownDescription": "Style lints to run, keyed by lint name, e.g. `{ \"missing-semicolon\": \"warning\" }`. Lints not listed are off. Takes effect after 'Squirrel LSP: Restart Server'."
         }
       }
     }

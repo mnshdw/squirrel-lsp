@@ -10,27 +10,52 @@ pub fn parse_squirrel(text: &str) -> Result<Tree, AnalysisError> {
     parser.parse(text, None).ok_or(AnalysisError::ParseFailed)
 }
 
+/// Whether a node of this kind holds a bare list of statements as its direct children.
+pub fn is_statement_list(kind: &str) -> bool {
+    matches!(
+        kind,
+        "script" | "block" | "case_statement" | "default_statement"
+    )
+}
+
+pub struct LineIndex<'a> {
+    text: &'a str,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> LineIndex<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            line_starts: std::iter::once(0)
+                .chain(text.match_indices('\n').map(|(index, _)| index + 1))
+                .collect(),
+        }
+    }
+
+    /// Convert byte offset to LSP Position.
+    pub fn position_at(&self, byte_offset: usize) -> Position {
+        let mut byte_offset = byte_offset.min(self.text.len());
+        while !self.text.is_char_boundary(byte_offset) {
+            byte_offset += 1;
+        }
+
+        // The offset sits on the last line that starts at or before it.
+        let line = self
+            .line_starts
+            .partition_point(|&start| start <= byte_offset)
+            - 1;
+        let col_utf16 = self.text[self.line_starts[line]..byte_offset]
+            .chars()
+            .map(|ch| ch.len_utf16() as u32)
+            .sum();
+        Position::new(u32::try_from(line).unwrap_or(u32::MAX), col_utf16)
+    }
+}
+
 /// Convert byte offset to LSP Position
 pub(crate) fn position_at(text: &str, byte_offset: usize) -> Position {
-    // Clamp to valid byte boundary
-    let byte_offset = byte_offset.min(text.len());
-    let mut line = 0u32;
-    let mut col_utf16 = 0u32;
-    let mut bytes_seen = 0usize;
-    for ch in text.chars() {
-        let ch_bytes = ch.len_utf8();
-        if bytes_seen >= byte_offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col_utf16 = 0;
-        } else {
-            col_utf16 += ch.len_utf16() as u32;
-        }
-        bytes_seen += ch_bytes;
-    }
-    Position::new(line, col_utf16)
+    LineIndex::new(text).position_at(byte_offset)
 }
 
 /// Convert LSP Position to byte offset

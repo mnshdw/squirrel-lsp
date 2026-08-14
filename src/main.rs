@@ -3,6 +3,7 @@ mod code_actions;
 mod errors;
 mod formatter;
 mod helpers;
+mod lint_analyzer;
 mod navigation;
 mod semantic_analyzer;
 mod symbol_extractor;
@@ -13,11 +14,12 @@ mod workspace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bb_support::{analyze_hooks, analyze_inheritance};
 use code_actions::generate_code_actions;
 use formatter::{FormatError, FormatOptions, IndentStyle, format_document};
+use serde::Deserialize;
 use symbol_resolver::{compute_symbol_diagnostics_with_globals, scan_file_bindings};
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
@@ -36,6 +38,7 @@ use tower_lsp::lsp_types::{
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 use workspace::Workspace;
 
+use crate::lint_analyzer::{LintConfig, compute_lint_diagnostics};
 use crate::semantic_analyzer::compute_semantic_tokens;
 use crate::syntax_analyzer::compute_syntax_diagnostics;
 
@@ -45,6 +48,7 @@ struct Backend {
     workspace: Arc<RwLock<Workspace>>,
     workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
     max_width: Arc<RwLock<usize>>,
+    lint_config: OnceLock<LintConfig>,
 }
 
 impl Backend {
@@ -55,6 +59,7 @@ impl Backend {
             workspace: Arc::new(RwLock::new(Workspace::new())),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
             max_width: Arc::new(RwLock::new(FormatOptions::default().max_width)),
+            lint_config: OnceLock::new(),
         }
     }
 
@@ -259,6 +264,23 @@ impl LanguageServer for Backend {
         if let Some(width) = Self::configured_max_width(params.initialization_options.as_ref()) {
             *self.max_width.write().await = width;
         }
+
+        let lints = params
+            .initialization_options
+            .as_ref()
+            .and_then(|options| options.get("lints"));
+        let mut lint_config = LintConfig::default();
+        if let Some(lints) = lints {
+            match LintConfig::deserialize(lints) {
+                Ok(config) => lint_config = config,
+                Err(e) => {
+                    self.client
+                        .log_message(MessageType::ERROR, format!("Ignoring bad lint config: {e}"))
+                        .await;
+                },
+            }
+        }
+        let _ = self.lint_config.set(lint_config);
 
         // Store workspace folders for later indexing
         let mut folders = self.workspace_folders.write().await;
@@ -557,6 +579,16 @@ impl Backend {
                 Vec::new()
             },
         };
+
+        let lint_config = self.lint_config.get_or_init(LintConfig::default);
+        match compute_lint_diagnostics(text, lint_config) {
+            Ok(lint_diags) => diags.extend(lint_diags),
+            Err(e) => {
+                self.client
+                    .log_message(MessageType::ERROR, format!("Lint failed: {e}"))
+                    .await;
+            },
+        }
 
         // Get workspace for globals and other analyses
         let workspace = self.workspace.read().await;

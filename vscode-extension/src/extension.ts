@@ -71,7 +71,12 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ language: "squirrel" }],
     outputChannelName: "Squirrel Language Server",
-    initializationOptions: { maxWidth },
+    initializationOptions: {
+      maxWidth,
+      lints: vscode.workspace
+        .getConfiguration("squirrelLsp")
+        .get<Record<string, string>>("lints", {}),
+    },
   };
 
   client = new LanguageClient(

@@ -3,6 +3,7 @@ pub mod code_actions;
 pub mod errors;
 pub mod formatter;
 pub mod helpers;
+pub mod lint_analyzer;
 pub mod navigation;
 pub mod semantic_analyzer;
 pub mod symbol_extractor;
