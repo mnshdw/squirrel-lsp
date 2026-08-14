@@ -8,7 +8,7 @@ this.perk_legend_muscularity <- this.inherit("scripts/skills/skill", {
 		this.m.IsActive = false;
 		this.m.IsStacking = false;
 		this.m.IsHidden = false;
-	},
+	}
 
 	function onAnySkillUsed(_skill, _targetEntity, _properties) {
 		local item = _skill.getItem();
@@ -29,7 +29,7 @@ this.perk_legend_muscularity <- this.inherit("scripts/skills/skill", {
 		{
 			_properties.DamageTotalMult *= 1.0 + this.getBonus();
 		}
-	},
+	}
 
 	function getBonus() {
 		local actor = this.getContainer().getActor();
@@ -41,7 +41,7 @@ this.perk_legend_muscularity <- this.inherit("scripts/skills/skill", {
 		)
 			* 0.0015;
 		return this.Math.minf(0.5, damageBonus);
-	},
+	}
 
 	function getUnactivatedPerkTooltipHints() {
 		return [
@@ -53,8 +53,8 @@ this.perk_legend_muscularity <- this.inherit("scripts/skills/skill", {
 					+ this.Const.UI.Color.PositiveValue
 					+ "]"
 					+ this.Math.round(this.getBonus() * 100)
-					+ "%[/color] Damage based on current Hitpoints and Fatigue",
-			},
+					+ "%[/color] Damage based on current Hitpoints and Fatigue"
+			}
 		];
-	},
+	}
 });

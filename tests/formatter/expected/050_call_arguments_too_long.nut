@@ -9,7 +9,7 @@ function f() {
 
 		function create() {
 			this.m.Type = this.Const.SkillType.Perk;
-		},
+		}
 	});
 	shortCall(a, b)
 	oneArgumentThatIsFarTooLongToFitOnASingleLineButHasNowhereToBreak(theOnlyArgumentIsThisOne)

@@ -17,5 +17,5 @@ this.foo <- this.inherit("scripts/foo", {
 			+ "[p]An old Vatt'ghern has answered the call of the Raven god. "
 			+ "Armed with mutagens and witcher potions, hunt the Usurper.\n\n"
 			+ "[color=#bcad8c]No Avatar:[/color] There is no main character.[/p]";
-	},
+	}
 });

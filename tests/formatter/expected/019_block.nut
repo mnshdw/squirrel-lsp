@@ -8,7 +8,7 @@ if (this.isFullBlessing()) {
 			+ ::Const.UI.Color.Status
 			+ "]Burns[/color] the ground on attack.\nIf the ground is already [color="
 			+ ::Const.UI.Color.Status
-			+ "]Burning[/color], doubles the bonus damage and removes the fire.",
+			+ "]Burning[/color], doubles the bonus damage and removes the fire."
 	});
 	ret.push({
 		id = 6,
@@ -24,6 +24,6 @@ if (this.isFullBlessing()) {
 			+ ::Const.UI.Color.PositiveValue
 			+ "]"
 			+ this.m.FatigueRecover
-			+ "[/color] Fatigue per turn.",
+			+ "[/color] Fatigue per turn."
 	});
 }

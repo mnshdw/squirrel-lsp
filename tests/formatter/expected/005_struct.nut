@@ -3,5 +3,5 @@
 	Name = "Rise of the Usurper Core",
 	Version = "1.9.0",
 	Const = {},
-	IsActingThisTurn = true,
+	IsActingThisTurn = true
 };

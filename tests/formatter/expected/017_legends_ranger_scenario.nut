@@ -13,7 +13,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.setRosterReputationTiers(this.Const.Roster.createReputationTiers(
 			this.m.StartingBusinessReputation
 		));
-	},
+	}
 
 	function onSpawnAssets() {
 		local roster = this.World.getPlayerRoster();
@@ -72,7 +72,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.World.Assets.getStash().add(this.new("scripts/items/trade/furs_item"));
 		this.World.Assets.m.ArmorParts = this.World.Assets.m.ArmorParts / 2;
 		this.World.Assets.m.Ammo = this.World.Assets.m.Ammo * 2;
-	},
+	}
 
 	function onSpawnPlayer() //forest spawn
 	{
@@ -148,17 +148,17 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 			},
 			null
 		);
-	},
+	}
 
 	function onInit() {
 		this.starting_scenario.onInit();
 		this.World.Flags.set("IsLegendsHunter", true);
 		this.World.Flags.set("IsLegendsDruid", true);
-	},
+	}
 
 	function getMovementSpeedMult() {
 		return 1.057;
-	},
+	}
 
 	function onCombatFinished() {
 		local roster = this.World.getPlayerRoster().getAll();
@@ -182,7 +182,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		}
 
 		return rangers != 0;
-	},
+	}
 
 	function onUpdateHiringRoster(_roster) {
 		this.addBroToRoster(_roster, "poacher_background", 6);
@@ -191,7 +191,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.addBroToRoster(_roster, "hunter_background", 6);
 		this.addBroToRoster(_roster, "legend_herbalist_background", 8);
 		this.addBroToRoster(_roster, "legend_ranger_background", 9);
-	},
+	}
 
 	function onHiredByScenario(bro) {
 		if (bro.getBackground().isBackgroundType(this.Const.BackgroundType.Druid)
@@ -202,7 +202,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		} else {
 			bro.worsenMood(2.0, "Does not like sleeping in the woods");
 		}
-	},
+	}
 
 	function onGenerateBro(bro) {
 		if (bro.getBackground().isBackgroundType(this.Const.BackgroundType.Druid)
@@ -216,7 +216,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 			bro.getBaseProperties().DailyWageMult *= 1.25; //1.0 = default
 			bro.getSkills().update();
 		}
-	},
+	}
 
 	function onBuildPerkTree(_background) {
 		this.addScenarioPerk(
@@ -226,5 +226,5 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 			_background.isBackgroundType(this.Const.BackgroundType.Druid)
 				|| _background.isBackgroundType(this.Const.BackgroundType.Ranger)
 		);
-	},
+	}
 });

@@ -8,5 +8,5 @@ local DemonicPropKeys = [
 	"ShieldDamage",          // 6
 	"AmmoMax",               // 7
 	"AdditionalAccuracy",    // 8
-	"FatigueOnSkillUse",      // 9
+	"FatigueOnSkillUse"      // 9
 ];

@@ -26,7 +26,7 @@ function update(dt) {
 		// a blank line that sets off a commented group is kept
 		3,
 
-		4,
+		4
 	]
 	drawUI(values) // still trails the statement it follows
 }

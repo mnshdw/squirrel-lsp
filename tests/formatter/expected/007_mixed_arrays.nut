@@ -10,9 +10,9 @@
 		[4, { Unit = ::Const.World.Spawn.Troops.ModDrasethisCatMinion, Max = 2 }],
 		[2, { Unit = ::Const.World.Spawn.Troops.Necromancer, Max = 1 }],
 		//barbarians
-		[4, { Unit = ::Const.World.Spawn.Troops.BarbarianMarauder, Max = 10 }],
+		[4, { Unit = ::Const.World.Spawn.Troops.BarbarianMarauder, Max = 10 }]
 	]),
 	Day100 = ::MSU.Class.WeightedContainer([
-		[5, { Unit = ::Const.World.Spawn.Troops.LegendBasiliskDrone, Max = 7 }],
-	]),
+		[5, { Unit = ::Const.World.Spawn.Troops.LegendBasiliskDrone, Max = 7 }]
+	])
 };

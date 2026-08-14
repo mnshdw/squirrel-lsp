@@ -25,7 +25,7 @@
 				SpawnOffsetMax = ::createVec(50, 40),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false,
+				FlickerEffect = false
 			},
 			{
 				LifeTimeMin = 4.0,
@@ -40,7 +40,7 @@
 				DirectionMax = ::createVec(0.400000006, -0.600000024),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false,
+				FlickerEffect = false
 			},
 			{
 				LifeTimeMin = 0.5,
@@ -53,9 +53,9 @@
 				VelocityMax = 30,
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false,
-			},
-		],
+				FlickerEffect = false
+			}
+		]
 	},
 	{
 		Delay = 0,
@@ -83,7 +83,7 @@
 				SpawnOffsetMax = ::createVec(50, 40),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false,
+				FlickerEffect = false
 			},
 			{
 				LifeTimeMin = 4.0,
@@ -98,7 +98,7 @@
 				DirectionMax = ::createVec(0.200000003, -0.300000012),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false,
+				FlickerEffect = false
 			},
 			{
 				LifeTimeMin = 0.5,
@@ -111,8 +111,8 @@
 				VelocityMax = 30,
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false,
-			},
-		],
-	},
+				FlickerEffect = false
+			}
+		]
+	}
 ];

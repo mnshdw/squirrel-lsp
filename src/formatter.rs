@@ -930,29 +930,24 @@ struct ListStyle {
     close: &'static str,
     /// A space inside the delimiters when the list is on one line: `{ a = 1 }` but `[1, 2]`
     pad: bool,
-    /// A ',' after the last item once the list is broken over lines
-    trailing_comma: bool,
 }
 
 const ARGS: ListStyle = ListStyle {
     open: "(",
     close: ")",
     pad: false,
-    trailing_comma: false,
 };
 
 const ARRAY: ListStyle = ListStyle {
     open: "[",
     close: "]",
     pad: false,
-    trailing_comma: true,
 };
 
 const TABLE: ListStyle = ListStyle {
     open: "{",
     close: "}",
     pad: true,
-    trailing_comma: true,
 };
 
 /// Writes a comma-separated list and its delimiters.
@@ -1024,20 +1019,37 @@ fn items_with_last_broken(items: &[Node], style: &ListStyle, ctx: &Ctx, shape: S
 struct Row {
     text: String,
     trailing: String,
-    is_item: bool,
+    /// A ',' the source wrote after this item
+    comma: bool,
     /// A blank line the source set before this row
     preceded_by_blank: bool,
 }
 
 impl Row {
-    fn new(text: String, is_item: bool, preceded_by_blank: bool) -> Self {
+    fn new(text: String, comma: bool, preceded_by_blank: bool) -> Self {
         Self {
             text,
             trailing: String::new(),
-            is_item,
+            comma,
             preceded_by_blank,
         }
     }
+}
+
+/// Returns where there is a ',' after this item.
+///
+/// A table can have its slots separated with a newline or not, and both are valid, so we keep
+/// whatever was in the source chose rather than rewrite one into the other.
+fn comma_follows(item: Node) -> bool {
+    let mut next = item.next_sibling();
+    while let Some(node) = next {
+        match node.kind() {
+            "," => return true,
+            "comment" => next = node.next_sibling(),
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// A table slot holding a named function, as in `function create() { ... }`.
@@ -1071,24 +1083,21 @@ fn items_one_per_line(items: &[Node], style: &ListStyle, ctx: &Ctx, shape: Shape
             _ if item.kind() == "comment" => {
                 rows.push(Row::new(ctx.text(*item).to_string(), false, blank));
             },
-            _ => rows.push(Row::new(render(*item, ctx, inner), true, blank)),
+            _ => rows.push(Row::new(
+                render(*item, ctx, inner),
+                comma_follows(*item),
+                blank,
+            )),
         }
         prev_end_row = Some(item.end_position().row);
         prev_end_byte = item.end_byte();
     }
 
-    // The formatter writes the ',' after the item and before its comment.
-    // Every item takes one but the last, which takes one only if the style says so.
-    let last_item = rows.iter().rposition(|row| row.is_item);
+    // The formatter writes the ',' after the item and before its comment
     let lines: Vec<String> = rows
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let comma = if row.is_item && (Some(index) != last_item || style.trailing_comma) {
-                ","
-            } else {
-                ""
-            };
+        .map(|row| {
+            let comma = if row.comma { "," } else { "" };
             let blank = if row.preceded_by_blank { "\n" } else { "" };
             format!("{blank}{indent}{}{comma}{}", row.text, row.trailing)
         })

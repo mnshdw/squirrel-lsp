@@ -2,9 +2,9 @@ class Config {
 
 	function save() {
 		local settings = {
-			fullscreen = FULL_SCREEN,
-			bgm_volume = BGM_VOLUME,
-			se_volume = SE_VOLUME,
+			fullscreen = FULL_SCREEN
+			bgm_volume = BGM_VOLUME
+			se_volume = SE_VOLUME
 		}
 		local f = file("config.nut", "w")
 		foreach (key, value in settings) {

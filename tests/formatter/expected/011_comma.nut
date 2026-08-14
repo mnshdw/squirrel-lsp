@@ -16,5 +16,5 @@
 			Row = 2,
 			Script = "scripts/entity/tactical/enemies/evil_kitty",
 		},
-	},
+	}
 }
