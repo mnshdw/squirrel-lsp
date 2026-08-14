@@ -1,6 +1,10 @@
 ::Const.AI.ParallelizationMode = false;
 ::Mod_ROTU.ModHook <- ::Hooks.register(::Mod_ROTU.ID, ::Mod_ROTU.Version, ::Mod_ROTU.Name);
-::Mod_ROTU.ModHook.require("mod_legends >= 19.2.0", "mod_modern_hooks >= 0.4.0", "mod_msu >= 1.2.7");
+::Mod_ROTU.ModHook.require(
+	"mod_legends >= 19.2.0",
+	"mod_modern_hooks >= 0.4.0",
+	"mod_msu >= 1.2.7"
+);
 ::Mod_ROTU.ModHook.conflictWith(
 	"mod_more_bandits",
 	"mod_elite_few",
@@ -27,17 +31,24 @@
 	"mod_alwaysLootNamedItems",
 	"mod_beast_loot"
 );
-::Mod_ROTU.ModHook.queue(">mod_legends", ">mod_msu", ">mod_nggh_magic_concept", ">mod_ACU", ">mod_stronghold", function () {
+::Mod_ROTU.ModHook.queue(
+	">mod_legends",
+	">mod_msu",
+	">mod_nggh_magic_concept",
+	">mod_ACU",
+	">mod_stronghold",
+	function () {
 
-	::Mod_ROTU.Mod <- ::MSU.Class.Mod(::Mod_ROTU.ID, ::Mod_ROTU.Version, ::Mod_ROTU.Name);
+		::Mod_ROTU.Mod <- ::MSU.Class.Mod(::Mod_ROTU.ID, ::Mod_ROTU.Version, ::Mod_ROTU.Name);
 
-	::HasAC <- ::Hooks.hasMod("mod_ACU");
-	::HasMC <- ::Hooks.hasMod("mod_nggh_magic_concept");
-	::HasStronghold <- ::Hooks.hasMod("mod_stronghold");
-	::HasFB <- ::Hooks.hasMod("mod_fantasybro");
-	::HasPoV <- ::Hooks.hasMod("mod_PoV");
-	::HasSSU <- ::Hooks.hasMod("mod_sellswords");
+		::HasAC <- ::Hooks.hasMod("mod_ACU");
+		::HasMC <- ::Hooks.hasMod("mod_nggh_magic_concept");
+		::HasStronghold <- ::Hooks.hasMod("mod_stronghold");
+		::HasFB <- ::Hooks.hasMod("mod_fantasybro");
+		::HasPoV <- ::Hooks.hasMod("mod_PoV");
+		::HasSSU <- ::Hooks.hasMod("mod_sellswords");
 
-	::include("mod_ROTU/load.nut");
-	::include("mod_snow_chat_origin/load.nut");
-});
+		::include("mod_ROTU/load.nut");
+		::include("mod_snow_chat_origin/load.nut");
+	}
+);

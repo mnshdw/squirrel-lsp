@@ -29,21 +29,6 @@ impl FormatOptions {
             ..Self::default()
         }
     }
-
-    fn push_indent(&self, buffer: &mut String, level: usize) {
-        match self.indent_style {
-            IndentStyle::Spaces(width) => {
-                for _ in 0..level * width {
-                    buffer.push(' ');
-                }
-            },
-            IndentStyle::Tabs => {
-                for _ in 0..level {
-                    buffer.push('\t');
-                }
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,127 +39,185 @@ pub enum IndentStyle {
 
 #[derive(Debug, Error)]
 pub enum FormatError {
-    #[error("failed to configure squirrel parser: {0}")]
-    Language(#[from] tree_sitter::LanguageError),
     #[error("failed to parse squirrel source")]
     ParseError,
-    #[error("encountered invalid utf-8 in source text")]
-    Utf8,
 }
 
-#[derive(Debug, Clone)]
-struct Token {
-    text: String,
-    kind: TokenKind,
-    preceded_by_newline: bool,
-    preceding_whitespace: String,
-    starts_statement: bool,
+const TAB_WIDTH: usize = 4;
+
+/// Where the formatter stands on the page.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// How many levels deep the formatter indents the lines it starts here.
+    indent: usize,
+    /// How many columns the formatter has already written on this line.
+    offset: usize,
+    /// When true the formatter ignores `max_width`.
+    unbounded: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenKind {
-    Keyword,
-    Identifier,
-    Number,
-    String,
-    Comment,
-    Symbol,
-    Other,
-    Blankline,
-}
-
-#[derive(Debug, Clone)]
-struct PrevToken {
-    text: String,
-    kind: TokenKind,
-    was_unary: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BraceKind {
-    ObjectInline,
-    ObjectMultiline,
-    Block,
-    BlockInline,
-    Switch,
-    DoBlock,
-}
-
-impl BraceKind {
-    fn is_object(self) -> bool {
-        matches!(self, BraceKind::ObjectInline | BraceKind::ObjectMultiline)
+impl Shape {
+    fn new(indent: usize, offset: usize) -> Self {
+        Self {
+            indent,
+            offset,
+            unbounded: false,
+        }
     }
 
-    fn is_inline(self) -> bool {
-        matches!(self, BraceKind::ObjectInline | BraceKind::BlockInline)
+    fn unbounded() -> Self {
+        Self {
+            indent: 0,
+            offset: 0,
+            unbounded: true,
+        }
+    }
+
+    /// Moves one level deeper, to the start of a fresh line.
+    fn block(self, ctx: &Ctx) -> Self {
+        let indent = self.indent + 1;
+        Self {
+            indent,
+            offset: ctx.indent_width(indent),
+            unbounded: self.unbounded,
+        }
+    }
+
+    /// Keeps `columns` free at the end of the line.
+    fn reserve(self, columns: usize) -> Self {
+        Self {
+            offset: self.offset + columns,
+            ..self
+        }
+    }
+
+    /// Where the formatter stands once it has written `text`.
+    /// If `text` broke over lines, the formatter is on the last of them.
+    /// That line starts at column zero, so the old offset no longer counts.
+    fn after(self, text: &str) -> Self {
+        let offset = match text.rsplit_once('\n') {
+            Some((_, last)) => display_width(last),
+            None => self.offset + display_width(text),
+        };
+        Self { offset, ..self }
+    }
+
+    /// Whether the formatter can write `text` here without passing `max_width`.
+    /// Text that already broke over lines never fits, however short its lines are.
+    fn fits(self, text: &str, ctx: &Ctx) -> bool {
+        if self.unbounded {
+            return true;
+        }
+        !text.contains('\n') && self.offset + display_width(text) <= ctx.options.max_width
+    }
+
+    /// The formatter accepts a broken layout when its first line still fits.
+    fn first_line_fits(self, text: &str, ctx: &Ctx) -> bool {
+        self.fits(text.lines().next().unwrap_or(text), ctx)
+    }
+
+    /// The formatter compares two layouts with this.
+    /// It keeps the broken one only when breaking actually made it narrower.
+    fn widest(self, text: &str) -> usize {
+        text.lines()
+            .enumerate()
+            .map(|(index, line)| {
+                let offset = if index == 0 { self.offset } else { 0 };
+                offset + display_width(line)
+            })
+            .max()
+            .unwrap_or(0)
     }
 }
 
-#[derive(Clone, Copy)]
-struct BraceContext {
-    kind: BraceKind,
-    paren_depth_at_open: usize,
-    bracket_depth_at_open: usize,
-    // Switch-specific state (only used when kind == BraceKind::Switch)
-    in_case_label: bool,
-    case_body_indented: bool,
-    // True if this brace was auto-inserted for single-statement if/else
-    is_synthetic: bool,
+/// Text the formatter is building, and the column it has reached.
+/// Every `put` moves that column along, so a renderer never measures its own output twice.
+struct Line<'ctx, 'src> {
+    text: String,
+    shape: Shape,
+    ctx: &'ctx Ctx<'src>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ParenKind {
-    For,
-    If,
-    Switch,
-    Function,
-    Regular,
+impl<'ctx, 'src> Line<'ctx, 'src> {
+    fn new(ctx: &'ctx Ctx<'src>, shape: Shape) -> Self {
+        Self {
+            text: String::new(),
+            shape,
+            ctx,
+        }
+    }
+
+    /// Writes literal text: a keyword, a delimiter, a separator.
+    fn put(&mut self, text: &str) -> &mut Self {
+        self.shape = self.shape.after(text);
+        self.text.push_str(text);
+        self
+    }
+
+    /// Renders a node into whatever room is left on the line.
+    fn node(&mut self, node: Node) -> &mut Self {
+        let rendered = render(node, self.ctx, self.shape);
+        self.put(&rendered)
+    }
+
+    fn opt_node(&mut self, node: Option<Node>) -> &mut Self {
+        match node {
+            Some(node) => self.node(node),
+            None => self,
+        }
+    }
+
+    fn finish(&mut self) -> String {
+        std::mem::take(&mut self.text)
+    }
 }
 
-#[derive(Clone, Copy)]
-struct ParenContext {
-    kind: ParenKind,
-    bracket_depth_at_open: usize,
-    multiline: bool,
-    indented: bool,
-    vertical: bool,
+struct Ctx<'a> {
+    source: &'a str,
+    options: &'a FormatOptions,
 }
 
-#[derive(Clone, Copy)]
-struct BracketContext {
-    pretty_print: bool,
-    /// True for an array index (foo[x]), false for an array literal ([1, 2, 3]).
-    is_index: bool,
-    /// Output position where the '[' was written
-    start_output_pos: usize,
+impl<'a> Ctx<'a> {
+    /// The result borrows the source, not this `Ctx`, so it outlives the call.
+    fn text(&self, node: Node) -> &'a str {
+        &self.source[node.byte_range()]
+    }
+
+    fn indent_width(&self, level: usize) -> usize {
+        match self.options.indent_style {
+            IndentStyle::Spaces(width) => level * width,
+            IndentStyle::Tabs => level * TAB_WIDTH,
+        }
+    }
+
+    fn indent(&self, level: usize) -> String {
+        match self.options.indent_style {
+            IndentStyle::Spaces(width) => " ".repeat(level * width),
+            IndentStyle::Tabs => "\t".repeat(level),
+        }
+    }
 }
 
-#[derive(Clone, Copy)]
-struct TernaryContext {
-    /// Total depth (paren + bracket) when the ternary started
-    depth_at_start: usize,
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch == '\t' { TAB_WIDTH } else { 1 })
+        .sum()
 }
 
 pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
     let tree = helpers::parse_squirrel(source).map_err(|_| FormatError::ParseError)?;
-    let root = tree.root_node();
-    // Be tolerant of parse errors: many Squirrel files use a more lenient syntax
-    // than the official grammar. Tree-sitter still produces a
-    // concrete syntax tree with ERROR nodes, so we can continue token collection and
-    // formatting without crashing the server or tests. This makes the formatter resilient
-    // while the grammar is extended to support lenient variants.
-    // if root.has_error() { return Err(FormatError::ParseError); }
+    let ctx = Ctx { source, options };
 
-    let tokens = collect_tokens(root, source)?;
+    // Through `render`, so the whole file gets the same guards a single node does
+    let mut output = render(tree.root_node(), &ctx, Shape::new(0, 0));
 
-    let mut formatter = Formatter::new(options);
-    for (idx, token) in tokens.iter().enumerate() {
-        let next = tokens.get(idx + 1);
-        let remaining = &tokens[idx + 1..];
-        formatter.write_token(token, next, remaining);
+    if options.trim_trailing_whitespace {
+        output = output
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
     }
-
-    let mut output = formatter.finish();
     if options.insert_final_newline && !output.ends_with('\n') {
         output.push('\n');
     }
@@ -182,1848 +225,1365 @@ pub fn format_document(source: &str, options: &FormatOptions) -> Result<String, 
     Ok(output)
 }
 
-struct Formatter<'a> {
-    options: &'a FormatOptions,
-    output: String,
-    indent_level: usize,
-    paren_depth: usize,
-    bracket_depth: usize,
-    needs_indent: bool,
-    pending_space: bool,
-    prev: Vec<PrevToken>,
-    braces: Vec<BraceContext>,
-    parens: Vec<ParenContext>,
-    brackets: Vec<BracketContext>,
-    ternaries: Vec<TernaryContext>,
-    // Track the kind of the last closed paren (used to detect switch blocks before '{')
-    last_closed_paren_kind: Option<ParenKind>,
-    // Track the paren_depth at which we started breaking logical operators
-    breaking_logical_at_depth: Option<usize>,
-    // Track the paren_depth at which we started breaking concat operators
-    breaking_concat_at_depth: Option<usize>,
+/// Finds the ';' the source put at the end of a statement.
+/// It is the next sibling, except after `return`, which holds its own.
+/// The formatter wants the node itself, because the gap after a statement starts where the
+/// ';' ends.
+fn semicolon_after(node: Node) -> Option<Node> {
+    fn semicolon(node: Option<Node>) -> Option<Node> {
+        node.filter(|node| node.kind() == ";")
+    }
+    let own_last = node.child(node.child_count().saturating_sub(1));
+
+    semicolon(own_last).or_else(|| semicolon(node.next_sibling()))
 }
 
-impl<'a> Formatter<'a> {
-    fn new(options: &'a FormatOptions) -> Self {
-        Self {
-            options,
-            output: String::new(),
-            indent_level: 0,
-            paren_depth: 0,
-            bracket_depth: 0,
-            needs_indent: true,
-            pending_space: false,
-            prev: Vec::new(),
-            braces: Vec::new(),
-            parens: Vec::new(),
-            brackets: Vec::new(),
-            ternaries: Vec::new(),
-            last_closed_paren_kind: None,
-            breaking_logical_at_depth: None,
-            breaking_concat_at_depth: None,
-        }
+/// ";" when the source ended this statement with one.
+fn semicolon_text(node: Node) -> &'static str {
+    semicolon_after(node).map_or("", |_| ";")
+}
+
+/// `f() -4` is one subtraction, and the grammar reads it as two statements.
+/// The formatter joins them back up when the number starts on the row the call ended on.
+/// Returns the number as the source wrote it, sign included.
+fn signed_continuation<'a>(
+    node: Node,
+    ctx: &Ctx<'a>,
+    prev_end_row: Option<usize>,
+) -> Option<&'a str> {
+    if !matches!(node.kind(), "integer" | "float")
+        || prev_end_row != Some(node.start_position().row)
+    {
+        return None;
     }
+    let text = ctx.text(node);
+    text.starts_with(['-', '+']).then_some(text)
+}
 
-    fn finish(mut self) -> String {
-        // A single-statement block that runs to the end of the file still has to be closed
-        self.close_synthetic_blocks(None);
+/// The spacing the source put in front of a trailing comment.
+/// The formatter copies it, so a column of aligned end-of-line comments stays aligned.
+fn gap<'a>(ctx: &Ctx<'a>, from: usize, to: usize) -> &'a str {
+    // The ',' sits in this span too, and the formatter writes that one itself
+    let gap = ctx
+        .source
+        .get(from..to)
+        .unwrap_or(" ")
+        .trim_start_matches([',', ';']);
 
-        if self.options.trim_trailing_whitespace {
-            trim_trailing_whitespace(&mut self.output);
-        }
-        self.output
+    if gap.is_empty() || !gap.trim().is_empty() || gap.contains('\n') {
+        " "
+    } else {
+        gap
     }
+}
 
-    fn total_depth(&self) -> usize {
-        self.paren_depth + self.bracket_depth
-    }
+fn blank_before(node: Node, prev_end_row: Option<usize>) -> bool {
+    prev_end_row.is_some_and(|prev| node.start_position().row > prev + 1)
+}
 
-    fn write_token(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
-        // A statement the source started on its own line is separated by that newline, which
-        // may be the only thing separating it from the previous one. Keep it. Statements the
-        // source wrote on one line ('if (x) break') are left to the rules below.
-        if token.starts_statement
-            && token.preceded_by_newline
-            && !self.output.is_empty()
-            && !matches!(token.kind, TokenKind::Comment | TokenKind::Blankline)
-        {
-            self.end_statement();
-            self.close_synthetic_blocks(Some(token));
-            self.push_newline();
-        }
+/// Whether the comment sits at the end of the previous node's line.
+fn trails(comment: Node, prev_end_row: Option<usize>) -> bool {
+    prev_end_row == Some(comment.start_position().row)
+}
 
-        // A comment between two statements is (in theory) not part of either, so the state the
-        // previous statement left behind (a ternary indent) must not indent it.
-        if token.kind == TokenKind::Comment
-            && token.preceded_by_newline
-            && Self::next_non_comment(remaining)
-                .is_some_and(|t| t.starts_statement && t.preceded_by_newline)
-        {
-            self.end_statement();
-        }
+/// Writes the children of a `script`, a `block` or a class body, one per line.
+fn render_statements(parent: Node, ctx: &Ctx, shape: Shape, keep: impl Fn(Node) -> bool) -> String {
+    let indent = ctx.indent(shape.indent);
+    let mut out = String::new();
+    let mut prev_end_row: Option<usize> = None;
+    let mut prev_end_byte = 0;
 
-        // A blank line after the statement of a single-statement block belongs after the
-        // block, not inside it. Nothing written since the '{' means the statement is still
-        // to come, and the block stays open.
-        if token.kind == TokenKind::Blankline
-            && self.braces.last().is_some_and(|b| b.is_synthetic)
-            && !self.output.trim_end().ends_with('{')
-        {
-            self.close_synthetic_blocks(None);
-        }
+    // The formatter keeps a blank line the source set right after the '{'.
+    // A block opens on its '{', a class a little later, once it has named itself.
+    let mut cursor = parent.walk();
+    let brace_row = parent
+        .children(&mut cursor)
+        .find(|child| child.kind() == "{")
+        .map(|brace| brace.end_position().row);
 
-        // Handle case/default in switch blocks before other processing
-        if self.in_switch_block() && matches!(token.text.as_str(), "case" | "default") {
-            self.close_synthetic_blocks(Some(token));
-            self.write_case_label(token);
-            return;
+    let mut cursor = parent.walk();
+    for child in parent.children(&mut cursor) {
+        if !child.is_named() || !keep(child) {
+            continue;
         }
 
-        let is_symbol = token.kind == TokenKind::Symbol;
-        match token.text.as_str() {
-            "{" if is_symbol => self.write_open_brace(token, next),
-            "}" if is_symbol => {
-                // The enclosing block ends, so any single-statement block inside it ends too
-                self.close_synthetic_blocks(Some(token));
-                self.write_close_brace(token, next);
-            },
-            ";" if is_symbol => self.write_semicolon(token, next),
-            "," if is_symbol => self.write_comma(token, next),
-            "(" if is_symbol => self.write_open_paren(token, remaining),
-            ")" if is_symbol => self.write_close_paren(token, remaining),
-            "[" if is_symbol => self.write_open_bracket(token, next, remaining),
-            "]" if is_symbol => self.write_close_bracket(token),
-            "." | "::" => self.write_member_access(token),
-            "?" => self.write_ternary(token, remaining),
-            ":" => self.write_colon(token, next),
-            "++" | "--" => self.write_increment(token),
-            "else" if token.kind == TokenKind::Keyword => self.write_else(token, remaining),
-            _ if token.kind == TokenKind::Comment => self.write_comment(token),
-            _ if token.kind == TokenKind::Blankline => self.write_blankline(next),
-            _ if token.kind != TokenKind::String && is_operator(token.text.as_str()) => {
-                self.write_operator(token, remaining)
-            },
-            _ if self.is_binary_signed_number(token) => self.write_signed_number(token),
-            _ => self.write_default(token),
+        // The formatter keeps a comment at the end of a statement on that line
+        if child.kind() == "comment" && trails(child, prev_end_row) {
+            out.push_str(gap(ctx, prev_end_byte, child.start_byte()));
+            out.push_str(ctx.text(child));
+            prev_end_row = Some(child.end_position().row);
+            prev_end_byte = child.end_byte();
+            continue;
         }
-    }
 
-    /// Helper function to find the next non-comment token
-    fn next_non_comment(remaining: &[Token]) -> Option<&Token> {
-        remaining
-            .iter()
-            .find(|t| t.kind != TokenKind::Comment && t.kind != TokenKind::Blankline)
-    }
+        // The formatter measures the gap from where the ';' ends, not where the statement does
+        let semicolon = semicolon_after(child);
 
-    /// Check if a token is an inline comment (not preceded by newline)
-    fn is_inline_comment(token: &Token) -> bool {
-        token.kind == TokenKind::Comment
-            && is_line_comment(token.text.trim_start())
-            && !token.preceded_by_newline
-    }
-
-    fn ensure_indent(&mut self) {
-        if self.needs_indent {
-            self.options
-                .push_indent(&mut self.output, self.indent_level);
-            self.needs_indent = false;
-        }
-    }
-
-    fn ends_with_whitespace(&self) -> bool {
-        matches!(
-            self.output.chars().last(),
-            Some(' ') | Some('\n') | Some('\t')
-        )
-    }
-
-    fn in_for_header(&self) -> bool {
-        self.paren_depth > 0
-            && self
-                .parens
-                .last()
-                .is_some_and(|f| matches!(f.kind, ParenKind::For))
-    }
-
-    fn in_function_params(&self) -> bool {
-        self.paren_depth > 0
-            && self
-                .parens
-                .last()
-                .is_some_and(|f| matches!(f.kind, ParenKind::Function))
-    }
-
-    fn in_multiline_call(&self) -> bool {
-        self.paren_depth > 0 && self.parens.last().is_some_and(|f| f.multiline)
-    }
-
-    fn in_object_top_level(&self) -> bool {
-        self.braces.last().is_some_and(|f| {
-            f.kind == BraceKind::ObjectMultiline
-                && f.paren_depth_at_open == self.paren_depth
-                && f.bracket_depth_at_open == self.bracket_depth
-        })
-    }
-
-    // True when we're positioned at the top level of an object literal (either inline or multiline)
-    // with matching paren/bracket depth where properties are written (i.e., not inside nested () or []).
-    fn in_object_property_position(&self) -> bool {
-        self.braces.last().is_some_and(|f| {
-            f.kind.is_object()
-                && f.paren_depth_at_open == self.paren_depth
-                && f.bracket_depth_at_open == self.bracket_depth
-        })
-    }
-
-    fn in_pretty_array(&self) -> bool {
-        let paren_bracket_depth = self
-            .parens
-            .last()
-            .map(|f| f.bracket_depth_at_open)
-            .unwrap_or(0);
-        let bracket_opened_in_paren =
-            self.paren_depth > 0 && self.bracket_depth > paren_bracket_depth;
-        self.brackets
-            .last()
-            .map(|b| b.pretty_print)
-            .unwrap_or(false)
-            && (self.paren_depth == 0 || bracket_opened_in_paren)
-    }
-
-    fn in_switch_block(&self) -> bool {
-        self.braces
-            .last()
-            .is_some_and(|f| f.kind == BraceKind::Switch)
-    }
-
-    fn apply_pending_space(&mut self) {
-        if self.pending_space && !self.ends_with_whitespace() {
-            self.output.push(' ');
-        }
-        self.pending_space = false;
-    }
-
-    fn push_newline(&mut self) {
-        if self.options.trim_trailing_whitespace {
-            trim_trailing_whitespace_line(&mut self.output);
-        }
-        if !self.output.ends_with('\n') {
-            self.output.push('\n');
-        }
-        self.needs_indent = true;
-        self.pending_space = false;
-        self.prev.clear();
-    }
-
-    fn prev(&self) -> Option<&PrevToken> {
-        self.prev.last()
-    }
-
-    fn prev_n(&self, n: usize) -> Option<&PrevToken> {
-        let len = self.prev.len();
-        if len > n {
-            self.prev.get(len - 1 - n)
+        // 'f() -4' is one subtraction, and the grammar read it as two statements
+        if let Some(number) = signed_continuation(child, ctx, prev_end_row) {
+            let (sign, digits) = number.split_at(1);
+            out.push(' ');
+            out.push_str(sign);
+            out.push(' ');
+            out.push_str(digits);
         } else {
-            None
-        }
-    }
-
-    fn push_prev(&mut self, token: &Token, was_unary: bool) {
-        self.prev.push(PrevToken {
-            text: token.text.clone(),
-            kind: token.kind,
-            was_unary,
-        });
-        // Keep only last few tokens
-        if self.prev.len() > 3 {
-            self.prev.remove(0);
-        }
-    }
-
-    fn set_prev(&mut self, token: &Token) {
-        self.push_prev(token, false);
-    }
-
-    fn prepare_token(&mut self, token: &Token) {
-        self.ensure_indent();
-        self.apply_pending_space();
-        let prev_was_unary = self.prev().is_some_and(|p| p.was_unary);
-        if !prev_was_unary && needs_space(self.prev(), token) && !self.ends_with_whitespace() {
-            self.output.push(' ');
-        }
-    }
-
-    fn write_open_brace(&mut self, token: &Token, next: Option<&Token>) {
-        self.prepare_token(token);
-
-        // Determine brace kind (object literal vs code block, inline vs multiline)
-        // Check if the previous closing paren was for a switch statement
-        let is_switch = matches!(self.last_closed_paren_kind, Some(ParenKind::Switch));
-        let is_block = self
-            .prev()
-            .is_some_and(|p| p.text == ")" || is_block_introducing_keyword(p.text.as_str()));
-        let is_empty = matches!(next.map(|n| n.text.as_str()), Some("}"));
-        let is_do = self.prev().is_some_and(|p| p.text == "do");
-
-        let kind = if is_switch {
-            BraceKind::Switch
-        } else if is_do {
-            BraceKind::DoBlock
-        } else if is_empty && !is_block {
-            BraceKind::ObjectInline
-        } else if is_empty && matches!(self.last_closed_paren_kind, Some(ParenKind::Function)) {
-            BraceKind::BlockInline
-        } else if is_block {
-            BraceKind::Block
-        } else {
-            BraceKind::ObjectMultiline
-        };
-
-        self.output.push('{');
-
-        self.braces.push(BraceContext {
-            kind,
-            paren_depth_at_open: self.paren_depth,
-            bracket_depth_at_open: self.bracket_depth,
-            in_case_label: false,
-            case_body_indented: false,
-            is_synthetic: false,
-        });
-
-        // Clear the last closed paren after consuming it
-        self.last_closed_paren_kind = None;
-
-        if kind.is_inline() {
-            // Keep {} inline (no indent or newline)
-            self.set_prev(token);
-            return;
-        }
-
-        self.indent_level += 1;
-        self.push_newline();
-    }
-
-    fn write_close_brace(&mut self, token: &Token, next: Option<&Token>) {
-        let frame = self.braces.pop();
-        let kind = frame.map(|f| f.kind);
-        let inline = kind.is_some_and(|k| k.is_inline());
-        let is_object = kind.is_some_and(|k| k.is_object());
-
-        // If closing a switch block with an active case body, dedent the case body first
-        if let Some(f) = frame
-            && f.kind == BraceKind::Switch
-            && f.case_body_indented
-        {
-            self.indent_level = self.indent_level.saturating_sub(1);
-        }
-
-        if !inline {
-            self.indent_level = self.indent_level.saturating_sub(1);
-        }
-        if !self.output.ends_with('\n') && !inline {
-            self.push_newline();
-        }
-
-        // Extra indent for objects in non-pretty-printed arrays (aligns } with ])
-        let next_is_bracket = matches!(next.map(|t| t.text.as_str()), Some("]"));
-        let in_pretty_array = self
-            .brackets
-            .last()
-            .map(|b| b.pretty_print)
-            .unwrap_or(false);
-        let needs_array_indent = !inline && next_is_bracket && !in_pretty_array && is_object;
-
-        if needs_array_indent {
-            self.indent_level += 1;
-        }
-
-        // Default: emit closing brace
-        self.ensure_indent();
-        self.output.push('}');
-        if needs_array_indent {
-            self.indent_level = self.indent_level.saturating_sub(1);
-        }
-        self.set_prev(token);
-
-        // Determine what follows the brace
-        if let Some(next_token) = next {
-            match next_token.text.as_str() {
-                ")" | ";" | "," | "." => {
-                    self.needs_indent = false;
-                    return;
-                },
-                "else" | "catch" | "finally" => {
-                    self.output.push(' ');
-                    self.needs_indent = false;
-                    self.prev.clear();
-                    return;
-                },
-                "while" if kind == Some(BraceKind::DoBlock) => {
-                    self.output.push(' ');
-                    self.needs_indent = false;
-                    self.prev.clear();
-                    return;
-                },
-                _ if Self::is_inline_comment(next_token) => {
-                    self.needs_indent = false;
-                    return;
-                },
-                _ => {},
-            }
-        }
-
-        if !inline || kind == Some(BraceKind::BlockInline) {
-            self.push_newline();
-        }
-    }
-
-    fn write_semicolon(&mut self, token: &Token, next: Option<&Token>) {
-        self.ensure_indent();
-        self.apply_pending_space();
-        self.output.push(';');
-
-        self.end_statement();
-
-        // If a line comment follows on the same line (not preceded by newline),
-        // keep it on the same line.
-        if next.is_some_and(Self::is_inline_comment) {
-            self.set_prev(token);
-            return;
-        }
-
-        if self.in_for_header() {
-            self.output.push(' ');
-            self.set_prev(token);
-        } else {
-            self.push_newline();
-        }
-
-        // If we auto-opened a block for a single-statement if/else, close it now
-        self.close_synthetic_blocks(next);
-    }
-
-    /// Close the blocks auto-opened for a single-statement if/else.
-    ///
-    /// The statement they wrap ends at a ';' but also at the newline before whatever comes
-    /// next, so this runs at every statement boundary. A block left open would swallow the
-    /// rest of the file.
-    fn close_synthetic_blocks(&mut self, next: Option<&Token>) {
-        while self.braces.last().is_some_and(|b| b.is_synthetic) {
-            let synthetic = Token {
-                text: "}".to_string(),
-                kind: TokenKind::Symbol,
-                preceded_by_newline: false,
-                preceding_whitespace: String::new(),
-                starts_statement: false,
-            };
-            self.write_close_brace(&synthetic, next);
-        }
-    }
-
-    fn write_comma(&mut self, token: &Token, next: Option<&Token>) {
-        self.prepare_token(token);
-
-        let in_object_top_level = self.in_object_top_level();
-        let in_function_params = self.in_function_params();
-        let in_pretty_array = self.in_pretty_array();
-        let in_multiline_call = self.in_multiline_call();
-
-        self.output.push(',');
-
-        // If a line comment follows on the same line (not preceded by newline),
-        // keep it on the same line.
-        if next.is_some_and(Self::is_inline_comment) {
-            self.set_prev(token);
-            return;
-        }
-
-        if in_object_top_level && !in_function_params {
-            match next {
-                Some(t) if t.text.as_str() == "function" => self.write_blankline(next),
-                _ => self.push_newline(),
-            }
-        } else if in_multiline_call {
-            self.push_newline();
-        } else if in_pretty_array {
-            // In a pretty-printed array, commas should create newlines
-            self.push_newline();
-        } else {
-            let should_space = next.is_none_or(|t| !matches!(t.text.as_str(), ")" | "]" | "}"));
-            if should_space {
-                self.output.push(' ');
-            }
-        }
-        self.set_prev(token);
-    }
-
-    fn write_open_paren(&mut self, token: &Token, remaining: &[Token]) {
-        self.prepare_token(token);
-        self.output.push('(');
-        self.paren_depth += 1;
-
-        let kind = match self.prev().map(|p| p.text.as_str()) {
-            Some("for") => ParenKind::For,
-            Some("if") => ParenKind::If,
-            Some("switch") => ParenKind::Switch,
-            Some("function") => ParenKind::Function,
-            _ if self.prev_n(1).is_some_and(|p| p.text == "function") => ParenKind::Function,
-            _ => ParenKind::Regular,
-        };
-
-        // Preserve a source newline after `(`, but not for trivial closers or
-        // for function calls whose first arg manages its own formatting.
-        let next_breaks_line = remaining
-            .first()
-            .is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), ")" | "[" | "{"));
-
-        // A call that does not fit on one line is split into one argument per line.
-        let is_call = matches!(kind, ParenKind::Regular)
-            && self.prev().is_some_and(|p| {
-                p.kind == TokenKind::Identifier || matches!(p.text.as_str(), ")" | "]")
-            });
-        let args_too_long = is_call
-            && has_top_level_comma(remaining)
-            && !has_block_argument(remaining)
-            && self.get_current_line_length() + self.estimate_paren_content_length(remaining) + 1
-                > self.options.max_width;
-
-        let should_multiline =
-            (next_breaks_line || args_too_long) && !matches!(kind, ParenKind::Function);
-        let should_indent = should_multiline && matches!(kind, ParenKind::Regular);
-
-        // `(a || b)` written inside a condition: decide once, here, whether the group fits on
-        // the line it starts on. Every operator in it then follows that decision.
-        let in_condition = self
-            .parens
-            .iter()
-            .any(|f| matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch));
-        let vertical = in_condition
-            && matches!(kind, ParenKind::Regular)
-            && has_top_level_logical_op(remaining)
-            && self.get_current_line_length() + self.estimate_paren_content_length(remaining) + 1
-                > self.options.max_width;
-
-        self.parens.push(ParenContext {
-            kind,
-            bracket_depth_at_open: self.bracket_depth,
-            multiline: should_multiline,
-            indented: should_indent,
-            vertical,
-        });
-
-        if should_indent {
-            self.indent_level += 1;
-            self.push_newline();
-        }
-
-        self.set_prev(token);
-    }
-
-    fn write_close_paren(&mut self, token: &Token, remaining: &[Token]) {
-        self.paren_depth = self.paren_depth.saturating_sub(1);
-
-        // If we're closing a paren and a ternary indent is active, reset it
-        while let Some(ctx) = self.ternaries.last() {
-            if self.total_depth() < ctx.depth_at_start {
-                self.indent_level = self.indent_level.saturating_sub(1);
-                self.ternaries.pop();
-            } else {
-                break;
-            }
-        }
-
-        let frame = self.parens.pop();
-        let frame_kind = frame.as_ref().map(|f| f.kind);
-        let is_if_header = frame_kind.is_some_and(|k| matches!(k, ParenKind::If));
-        let was_multiline = frame.is_some_and(|f| f.multiline);
-        let was_indented = frame.is_some_and(|f| f.indented);
-
-        // Track the paren kind for the next open brace (e.g., to detect switch blocks)
-        self.last_closed_paren_kind = frame_kind;
-
-        if was_indented {
-            self.indent_level = self.indent_level.saturating_sub(1);
-        }
-
-        // For multiline function calls, close paren goes on its own line.
-        if was_multiline
-            && matches!(frame_kind, Some(ParenKind::Regular))
-            && !self.output.ends_with('\n')
-        {
-            self.push_newline();
-        }
-
-        if matches!(
-            frame_kind,
-            Some(ParenKind::If | ParenKind::For | ParenKind::Switch)
-        ) {
-            self.breaking_logical_at_depth = None;
-            self.breaking_concat_at_depth = None;
-        }
-
-        self.ensure_indent();
-        self.apply_pending_space();
-        self.output.push(')');
-
-        // Check if there's an inline comment immediately after the closing paren
-        let next_is_inline_comment = remaining.first().is_some_and(Self::is_inline_comment);
-
-        // Look ahead past comments to find the next non-comment token
-        let next_non_comment = Self::next_non_comment(remaining);
-        let next_is_brace = next_non_comment.is_some_and(|t| t.text == "{");
-        if next_is_brace {
-            // Place opening brace on a new line if the condition was multiline
-            if was_multiline {
-                self.push_newline();
-            } else if !next_is_inline_comment {
-                self.output.push(' ');
-                self.needs_indent = false;
-            }
-        } else if is_if_header {
-            // Auto-insert a block for single-statement ifs
-            self.output.push(' ');
-            self.output.push('{');
-            self.indent_level += 1;
-            self.push_newline();
-
-            // Push synthetic brace context
-            self.braces.push(BraceContext {
-                kind: BraceKind::Block,
-                paren_depth_at_open: self.paren_depth,
-                bracket_depth_at_open: self.bracket_depth,
-                in_case_label: false,
-                case_body_indented: false,
-                is_synthetic: true,
-            });
-        }
-        self.set_prev(token);
-    }
-
-    fn write_open_bracket(&mut self, token: &Token, next: Option<&Token>, remaining: &[Token]) {
-        self.prepare_token(token);
-        self.output.push('[');
-        self.bracket_depth += 1;
-
-        // Detect if this is an array index (foo[x]) or array literal ([1, 2, 3])
-        let is_index = self.prev().is_some_and(|p| {
-            matches!(
-                p.kind,
-                TokenKind::Identifier | TokenKind::Number | TokenKind::String
-            ) || matches!(p.text.as_str(), "]" | ")" | "}")
-        });
-
-        // Don't pretty-print array indexes or empty arrays
-        let is_empty = matches!(next.map(|n| n.text.as_str()), Some("]"));
-
-        if is_index || is_empty {
-            self.brackets.push(BracketContext {
-                pretty_print: false,
-                is_index,
-                start_output_pos: self.output.len(),
-            });
-            self.set_prev(token);
-            return;
-        }
-
-        // Enable pretty-printing for arrays of objects/arrays
-        let next_is_complex = matches!(next.map(|n| n.text.as_str()), Some("{") | Some("["));
-
-        // Estimate if array content would exceed max_width chars on one line
-        let estimated_length = self.estimate_array_length(remaining);
-
-        // For arrays inside function calls, only check the array length itself.
-        // For top-level arrays (assignments, etc.), check the full line length.
-        let would_be_too_long = if self.paren_depth > 0 {
-            estimated_length > self.options.max_width
-        } else {
-            let current_line_length = self.get_current_line_length();
-            current_line_length + estimated_length > self.options.max_width
-        };
-
-        // If the input had a newline after '[', keep it for consistency
-        let user_pref = {
-            let first = remaining.first();
-            let check_token = if first.is_some_and(Self::is_inline_comment) {
-                remaining.get(1)
-            } else {
-                first
-            };
-            check_token.is_some_and(|t| t.preceded_by_newline && !matches!(t.text.as_str(), "]"))
-        };
-
-        // Pretty-print if:
-        // - Contains complex elements (objects/arrays)
-        // - Would exceed max_width
-        // - User explicitly formatted it multiline
-        let should_pretty_print = next_is_complex || would_be_too_long || user_pref;
-
-        self.brackets.push(BracketContext {
-            pretty_print: should_pretty_print,
-            is_index: false,
-            start_output_pos: self.output.len(),
-        });
-
-        if should_pretty_print {
-            if !remaining.first().is_some_and(Self::is_inline_comment) {
-                self.push_newline();
-            }
-            self.indent_level += 1;
-        }
-        self.set_prev(token);
-    }
-
-    fn write_close_bracket(&mut self, token: &Token) {
-        self.bracket_depth = self.bracket_depth.saturating_sub(1);
-
-        let ctx = self.brackets.pop();
-        let was_pretty = ctx.map(|c| c.pretty_print).unwrap_or(false);
-        let was_index = ctx.is_some_and(|c| c.is_index);
-        let start_idx = ctx.map(|c| c.start_output_pos).unwrap_or(self.output.len());
-
-        if was_pretty {
-            self.indent_level = self.indent_level.saturating_sub(1);
-            if !self.output.ends_with('\n') {
-                self.push_newline();
-            }
-        } else if !was_index {
-            let had_newline_since_open = self.output[start_idx..].contains('\n');
-            if had_newline_since_open && !self.output.ends_with('\n') {
-                self.push_newline();
-            }
-        }
-        self.ensure_indent();
-        self.apply_pending_space();
-        self.output.push(']');
-        self.set_prev(token);
-    }
-
-    fn write_member_access(&mut self, token: &Token) {
-        self.prepare_token(token);
-
-        let keep_space = token.text == "::"
-            || self.prev().is_some_and(|p| {
-                p.kind == TokenKind::Keyword
-                    || is_operator(&p.text)
-                    || p.text == ","
-                    || p.text == ":"
-                    || p.text == "?"
-            });
-        if self.output.ends_with(' ') && !keep_space {
-            self.output.pop();
-        }
-        self.output.push_str(&token.text);
-        self.set_prev(token);
-    }
-
-    fn write_ternary(&mut self, token: &Token, remaining: &[Token]) {
-        let line_length = self.get_current_line_length();
-        let estimated_length = self.estimate_ternary_length(remaining);
-
-        // " ? " contributes 3 characters
-        let would_exceed = line_length + 3 + estimated_length > self.options.max_width;
-
-        if would_exceed {
-            // Break to new line and indent
-            self.push_newline();
-            self.indent_level += 1;
-            self.ternaries.push(TernaryContext {
-                depth_at_start: self.total_depth(),
-            });
-            self.ensure_indent();
-            self.output.push('?');
-            self.output.push(' ');
-            self.set_prev(token);
-            return;
-        }
-
-        // Default inline formatting
-        self.prepare_token(token);
-        if !self.output.ends_with(' ') {
-            self.output.push(' ');
-        }
-        self.output.push('?');
-        self.output.push(' ');
-        self.set_prev(token);
-    }
-
-    fn write_colon(&mut self, token: &Token, next: Option<&Token>) {
-        // Handle case/default label colons specially
-        let in_case_label = self
-            .braces
-            .last()
-            .is_some_and(|f| f.kind == BraceKind::Switch && f.in_case_label);
-
-        if in_case_label {
-            // For case labels, remove any pending space before the colon
-            if self.output.ends_with(' ') {
-                self.output.pop();
-            }
-            self.ensure_indent();
-            self.output.push(':');
-            self.push_newline();
-            self.indent_level += 1;
-
-            // Mark the case body as indented in the switch frame
-            if let Some(frame) = self.braces.last_mut() {
-                frame.case_body_indented = true;
-                frame.in_case_label = false;
-            }
-            return;
-        }
-
-        // Decide between ternary colon and object property colon
-        let prev_is_question = self.prev().is_some_and(|p| p.text.as_str() == "?");
-        let in_object_property = self.in_object_property_position();
-
-        if !self.ternaries.is_empty() && !in_object_property {
-            if !self.output.ends_with('\n') {
-                self.push_newline();
-            }
-
-            self.ensure_indent();
-            self.output.push(':');
-            self.output.push(' ');
-            self.set_prev(token);
-            return;
-        }
-
-        self.prepare_token(token);
-
-        if prev_is_question {
-            // Inline ternary: ensure space before and after
-            if !self.output.ends_with(' ') {
-                self.output.push(' ');
-            }
-            self.output.push(':');
-            self.output.push(' ');
-            self.set_prev(token);
-            return;
-        }
-
-        if in_object_property {
-            // Object property: no space before colon, optional space after
-            if self.output.ends_with(' ') {
-                self.output.pop();
-            }
-            self.output.push(':');
-            let should_space = !matches!(next.map(|t| t.text.as_str()), Some("}" | "," | ";"));
-            if should_space {
-                self.output.push(' ');
-            }
-            self.set_prev(token);
-            return;
-        }
-
-        // Default behavior: treat as ternary-style spacing
-        if !self.output.ends_with(' ') {
-            self.output.push(' ');
-        }
-        self.output.push(':');
-        self.output.push(' ');
-        self.set_prev(token);
-    }
-
-    fn write_increment(&mut self, token: &Token) {
-        self.prepare_token(token);
-        self.output.push_str(&token.text);
-        self.set_prev(token);
-    }
-
-    fn write_operator(&mut self, token: &Token, remaining: &[Token]) {
-        if is_unary_operator(token.text.as_str()) && is_unary_context(self.prev()) {
-            self.write_unary_operator(token);
-            return;
-        }
-
-        let is_logical_op = matches!(token.text.as_str(), "&&" | "||");
-        let is_binary_op = matches!(
-            token.text.as_str(),
-            "+" | "-" | "*" | "/" | "==" | "!=" | "<" | "<=" | ">" | ">="
-        );
-
-        // Logical operators can break anywhere when lines are too long
-        // Other binary operators only break at top level (paren_depth == 0),
-        // except for string concat chains which are allowed to break at any depth.
-        let in_string_concat = token.text == "+"
-            && self.prev().is_some_and(|p| p.kind == TokenKind::String)
-            && remaining
-                .iter()
-                .find(|t| t.kind != TokenKind::Blankline && t.kind != TokenKind::Comment)
-                .is_some_and(|t| t.kind == TokenKind::String);
-        let can_break = is_logical_op || self.paren_depth == 0 || in_string_concat;
-
-        if (is_logical_op || is_binary_op)
-            && can_break
-            && self.should_break_before_operator(token, remaining, is_logical_op)
-        {
-            self.write_operator_with_line_break(token, is_logical_op);
-            return;
-        }
-
-        self.write_operator_default(token);
-    }
-
-    fn write_unary_operator(&mut self, token: &Token) {
-        self.prepare_token(token);
-        self.output.push_str(&token.text);
-        // Mark that this was a unary operator so the next token doesn't
-        // get a space inserted after it.
-        self.push_prev(token, true);
-    }
-
-    fn is_in_condition(&self) -> bool {
-        self.paren_depth > 0
-            && self
-                .parens
-                .last()
-                .is_some_and(|f| matches!(f.kind, ParenKind::If | ParenKind::Switch))
-    }
-
-    fn is_at_condition_top_level(&self) -> bool {
-        self.parens
-            .last()
-            .is_some_and(|f| matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch))
-    }
-
-    fn should_break_before_operator(
-        &self,
-        token: &Token,
-        remaining: &[Token],
-        is_logical_op: bool,
-    ) -> bool {
-        let line_length = self.get_current_line_length();
-        let in_condition = self.is_in_condition();
-        let at_condition_top_level = self.is_at_condition_top_level();
-
-        let active_break_depth = if is_logical_op {
-            self.breaking_logical_at_depth
-        } else {
-            self.breaking_concat_at_depth
-        };
-
-        let should_break = if active_break_depth == Some(self.paren_depth) {
-            // Already breaking operators of this kind at this depth
-            true
-        } else if is_logical_op {
-            let estimated_remaining = if in_condition {
-                self.estimate_paren_content_length(remaining)
-            } else {
-                self.estimate_statement_length(remaining)
-            };
-            // " <op> " contributes 1 + op.len() + 1 characters
-            let op_len = 1 + token.text.len() + 1;
-            // For conditions, also include ") {"
-            let cond_len = if in_condition { 3 } else { 0 };
-            line_length + op_len + estimated_remaining + cond_len > self.options.max_width
-        } else {
-            let op_len = 1 + token.text.len() + 1;
-            line_length + op_len + Self::next_operand_len(remaining) > self.options.max_width
-        };
-
-        if !should_break {
-            return false;
-        }
-
-        // Prefer breaking at the top-level of a condition, not inside nested
-        // parenthesized sub-expressions like `(a || b)`.
-        let inside_any_condition = self
-            .parens
-            .iter()
-            .any(|f| matches!(f.kind, ParenKind::If | ParenKind::For | ParenKind::Switch));
-
-        if is_logical_op && inside_any_condition && !at_condition_top_level {
-            return self.parens.last().is_some_and(|f| f.vertical);
-        }
-
-        true
-    }
-
-    /// Treats consecutive String tokens (open quote / body / close quote) as one operand.
-    fn next_operand_len(remaining: &[Token]) -> usize {
-        let mut len = 0;
-        let mut in_string = false;
-        for t in remaining {
-            if matches!(t.kind, TokenKind::Blankline | TokenKind::Comment) {
-                continue;
-            }
-            if t.kind == TokenKind::String {
-                len += t.text.len();
-                in_string = true;
-            } else {
-                if !in_string {
-                    len += t.text.len();
-                }
-                break;
-            }
-        }
-        len
-    }
-
-    fn write_operator_with_line_break(&mut self, token: &Token, is_logical_op: bool) {
-        // Mark that we're breaking operators at this depth
-        if is_logical_op && self.breaking_logical_at_depth.is_none() {
-            self.breaking_logical_at_depth = Some(self.paren_depth);
-        } else if !is_logical_op && self.breaking_concat_at_depth.is_none() {
-            self.breaking_concat_at_depth = Some(self.paren_depth);
-        }
-
-        // A line break inside an if/for/switch makes the content multiline
-        if let Some(frame) = self.parens.last_mut()
-            && matches!(
-                frame.kind,
-                ParenKind::If | ParenKind::For | ParenKind::Switch
-            )
-        {
-            frame.multiline = true;
-        }
-
-        self.push_newline();
-
-        let extra_indent = self.calculate_operator_indent(is_logical_op);
-        self.indent_level += extra_indent;
-        self.ensure_indent();
-        self.indent_level = self.indent_level.saturating_sub(extra_indent);
-
-        self.output.push_str(&token.text);
-        self.pending_space = true;
-        self.set_prev(token);
-    }
-
-    fn calculate_operator_indent(&self, is_logical_op: bool) -> usize {
-        let in_condition = self.is_in_condition();
-
-        // Calculate extra indentation:
-        // - Base: +1 for continuation line
-        // - If we're inside parens deeper than where we started: +1 for each extra level
-        let breaking_depth = self.breaking_logical_at_depth.unwrap_or(0);
-        let extra_paren_indent =
-            if is_logical_op && self.paren_depth > breaking_depth && !in_condition {
-                self.paren_depth - breaking_depth
-            } else {
-                0
-            };
-
-        1 + extra_paren_indent
-    }
-
-    fn write_operator_default(&mut self, token: &Token) {
-        self.prepare_token(token);
-        if !self.output.ends_with(' ') {
-            self.output.push(' ');
-        }
-        self.output.push_str(&token.text);
-        self.pending_space = true;
-        self.set_prev(token);
-    }
-
-    fn write_comment(&mut self, token: &Token) {
-        let text = token.text.replace("\r\n", "\n");
-        let trimmed_text = text.trim_start();
-
-        // A comment the source put on its own line stays on its own line. The statement
-        // before it may have ended on a newline (rather than a ;) in which case nothing
-        // has broken the line yet.
-        if token.preceded_by_newline && !self.output.is_empty() && !self.output.ends_with('\n') {
-            self.push_newline();
-        }
-
-        if is_line_comment(trimmed_text) {
-            if !self.output.is_empty() && !self.output.ends_with('\n') {
-                // Inline comment after code - preserve alignment whitespace
-                let spacing: String = token
-                    .preceding_whitespace
-                    .chars()
-                    // Convert tabs to single spaces (tabs in alignment don't make sense)
-                    .map(|c| if c == '\t' { ' ' } else { c })
-                    .collect();
-                // Ensure at least one space if no spacing was preserved
-                if spacing.is_empty() {
-                    if !matches!(self.output.chars().last(), Some(' ') | Some('\t')) {
-                        self.output.push(' ');
-                    }
-                } else {
-                    self.output.push_str(&spacing);
-                }
-                self.output.push_str(trimmed_text);
-                self.push_newline();
-            } else {
-                // Comment on its own line - use trimmed version to normalize indentation
-                self.ensure_indent();
-                self.output.push_str(trimmed_text);
-                self.push_newline();
-            }
-            return;
-        }
-
-        if text.contains('\n') {
-            // Multiline comments should be preserved exactly as written
-            for (idx, line) in text.lines().enumerate() {
-                if idx > 0 {
-                    self.push_newline();
-                }
-                // Only indent the first line; preserve internal formatting
-                if idx == 0 {
-                    self.ensure_indent();
-                }
-                self.output.push_str(line);
-            }
-            self.push_newline();
-            return;
-        }
-
-        if self.output.is_empty() || self.output.ends_with('\n') {
-            self.ensure_indent();
-            self.output.push_str(&text);
-            self.set_prev(token);
-            return;
-        }
-
-        self.prepare_token(token);
-        if !self.output.ends_with(' ') {
-            self.output.push(' ');
-        }
-        self.output.push_str(&text);
-        self.set_prev(token);
-    }
-
-    fn write_default(&mut self, token: &Token) {
-        self.prepare_token(token);
-        self.output.push_str(&token.text);
-        self.set_prev(token);
-    }
-
-    /// `a -4` sadly lexes the sign into the number, so what the source means as a subtraction
-    /// arrives as a single Number token, we use the operand before to tell them apart.
-    fn is_binary_signed_number(&self, token: &Token) -> bool {
-        token.kind == TokenKind::Number
-            && token.text.len() > 1
-            && token.text.starts_with(['-', '+'])
-            && !is_unary_context(self.prev())
-    }
-
-    fn write_signed_number(&mut self, token: &Token) {
-        let (sign, magnitude) = token.text.split_at(1);
-
-        self.ensure_indent();
-        self.apply_pending_space();
-        if !self.ends_with_whitespace() {
-            self.output.push(' ');
-        }
-        self.output.push_str(sign);
-        self.output.push(' ');
-        self.output.push_str(magnitude);
-        self.set_prev(token);
-    }
-
-    fn end_statement(&mut self) {
-        self.breaking_logical_at_depth = None;
-        self.breaking_concat_at_depth = None;
-        while self.ternaries.pop().is_some() {
-            self.indent_level = self.indent_level.saturating_sub(1);
-        }
-    }
-
-    fn write_else(&mut self, token: &Token, remaining: &[Token]) {
-        // The if body ends here, even when no ';' closed it
-        self.close_synthetic_blocks(Some(token));
-
-        self.prepare_token(token);
-        self.output.push_str(&token.text);
-
-        // Check if there's an inline comment immediately after else
-        let next_is_inline_comment = remaining.first().is_some_and(Self::is_inline_comment);
-
-        // Look ahead past comments to find the next non-comment token
-        let next_non_comment = Self::next_non_comment(remaining);
-        let next_is_brace = next_non_comment.is_some_and(|t| t.text == "{");
-        let next_is_if = next_non_comment.is_some_and(|t| t.text == "if");
-
-        if !next_is_brace && !next_is_if {
-            // Auto-insert block for single-statement else
-            self.output.push(' ');
-            self.output.push('{');
-            self.indent_level += 1;
-            self.push_newline();
-
-            self.braces.push(BraceContext {
-                kind: BraceKind::Block,
-                paren_depth_at_open: self.paren_depth,
-                bracket_depth_at_open: self.bracket_depth,
-                in_case_label: false,
-                case_body_indented: false,
-                is_synthetic: true,
-            });
-        } else if !next_is_inline_comment {
-            self.output.push(' ');
-            self.needs_indent = false;
-        }
-
-        self.set_prev(token);
-    }
-
-    fn write_case_label(&mut self, token: &Token) {
-        // If we were in a case body, dedent before the new case label
-        if let Some(frame) = self.braces.last_mut() {
-            if frame.case_body_indented {
-                self.indent_level = self.indent_level.saturating_sub(1);
-                frame.case_body_indented = false;
-            }
-            // Mark that we're now in a case label (before the colon)
-            frame.in_case_label = true;
-        }
-
-        self.prepare_token(token);
-        self.output.push_str(&token.text);
-        self.set_prev(token);
-    }
-
-    fn write_blankline(&mut self, next: Option<&Token>) {
-        // Blank lines between array elements are dropped as noise, but one that sets off a
-        // commented group of elements is what makes the group readable.
-        let separates_comment = next.is_some_and(|t| t.kind == TokenKind::Comment);
-        if !self.brackets.is_empty() && !separates_comment {
-            return;
-        }
-        if self.output.ends_with("\n\n") {
-            return;
-        }
-        if !self.output.ends_with('\n') {
-            self.push_newline();
-        }
-        self.output.push('\n');
-        self.needs_indent = true;
-        self.pending_space = false;
-        self.prev.clear();
-    }
-
-    fn estimate_token_spacing(&self, prev_text: &str, token: &Token) -> usize {
-        // No space before closers or punctuation that doesn't take a leading space
-        if matches!(token.text.as_str(), "]" | ")" | "}" | "," | "." | "::") {
-            return 0;
-        }
-
-        // No space right after openers or member access
-        if matches!(prev_text, "[" | "(" | "{" | "." | "::") {
-            return 0;
-        }
-
-        // Space before operator tokens
-        if is_operator(&token.text) {
-            return 1;
-        }
-
-        // Space after comma
-        if prev_text == "," {
-            return 1;
-        }
-
-        // Space after operator
-        if is_operator(prev_text) {
-            return 1;
-        }
-
-        0
-    }
-
-    fn estimate_array_length(&self, remaining: &[Token]) -> usize {
-        let mut length = 1; // Opening '['
-        let mut depth = 0; // Track nested brackets (starts at 0, first ']' we encounter closes our array)
-        let mut prev_text = "[";
-
-        for token in remaining {
-            // If we hit the closing bracket at depth 0, we're done
-            if token.text == "]" && depth == 0 {
-                length += 1; // Closing ']'
-                break;
-            }
-
-            match token.text.as_str() {
-                "[" => depth += 1,
-                "]" if depth > 0 => {
-                    depth -= 1;
-                },
-                _ => {},
-            }
-
-            // Skip blanklines and comments for estimation
-            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
-                continue;
-            }
-
-            length += token.text.len();
-            length += self.estimate_token_spacing(prev_text, token);
-            prev_text = &token.text;
-        }
-
-        length
-    }
-
-    fn get_current_line_length(&self) -> usize {
-        // Find the last newline and count visual width (tabs count as 4 spaces)
-        let line = self
-            .output
-            .rsplit_once('\n')
-            .map(|(_, after)| after)
-            .unwrap_or(&self.output);
-
-        line.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
-    }
-
-    fn estimate_paren_content_length(&self, remaining: &[Token]) -> usize {
-        let mut length = 0;
-        let mut depth = 0;
-        let mut prev_text = "(";
-
-        for token in remaining {
-            // Track paren depth to find the matching closing paren
-            match token.text.as_str() {
-                "(" => depth += 1,
-                ")" => {
-                    if depth == 0 {
-                        // Found the closing paren for this condition
-                        break;
-                    }
-                    depth -= 1;
-                },
-                _ => {},
-            }
-
-            // Skip blanklines and comments for estimation
-            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
-                continue;
-            }
-
-            length += token.text.len();
-            length += self.estimate_token_spacing(prev_text, token);
-            prev_text = &token.text;
-        }
-
-        length
-    }
-
-    fn estimate_statement_length(&self, remaining: &[Token]) -> usize {
-        let mut length = 0;
-        let mut prev_text = "";
-
-        for token in statement_slice(remaining) {
-            if matches!(token.text.as_str(), ";" | "{" | "}") {
-                break;
-            }
-
-            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
-                continue;
-            }
-
-            length += token.text.len();
-            length += self.estimate_token_spacing(prev_text, token);
-            prev_text = &token.text;
-        }
-
-        length
-    }
-
-    fn estimate_ternary_length(&self, remaining: &[Token]) -> usize {
-        let mut length = 0;
-        let mut prev_text = "?";
-        let mut ternary_depth = 0;
-        let mut nesting_depth = 0;
-        let mut seen_colon = false;
-
-        for token in statement_slice(remaining) {
-            match token.text.as_str() {
-                "?" => ternary_depth += 1,
-                ":" => {
-                    if ternary_depth == 0 {
-                        if seen_colon {
-                            break;
-                        }
-                        seen_colon = true;
-                        length += 2; // ": "
-                        prev_text = ":";
-                        continue;
-                    }
-                    ternary_depth -= 1;
-                },
-                "(" | "[" | "{" => nesting_depth += 1,
-                ")" | "]" | "}" => {
-                    if nesting_depth == 0 {
-                        if seen_colon && ternary_depth == 0 {
-                            break;
-                        }
-                    } else {
-                        nesting_depth -= 1;
+            match prev_end_row {
+                Some(prev) => {
+                    out.push('\n');
+                    // One blank line at most, and only where the source had one too
+                    if blank_before(child, Some(prev)) {
+                        out.push('\n');
                     }
                 },
-                ";" => break,
-                "," if nesting_depth == 0 && ternary_depth == 0 && seen_colon => {
-                    break;
+                None if brace_row.is_some_and(|row| blank_before(child, Some(row))) => {
+                    out.push('\n');
                 },
-                _ => {},
+                None => {},
             }
 
-            if token.kind == TokenKind::Blankline || token.kind == TokenKind::Comment {
-                continue;
-            }
-
-            length += token.text.len();
-            length += self.estimate_token_spacing(prev_text, token);
-            prev_text = &token.text;
+            out.push_str(&indent);
+            // The ';' the formatter is about to write needs a column of its own
+            let room = shape.reserve(usize::from(semicolon.is_some()));
+            out.push_str(&render(child, ctx, room));
         }
 
-        length
-    }
-}
-
-/// Whether one of the tokens is a '&&' or a '||' outside any nested brackets.
-fn has_top_level_logical_op(tokens: &[Token]) -> bool {
-    let mut depth = 0usize;
-    for token in tokens {
-        if matches!(token.kind, TokenKind::String | TokenKind::Comment) {
-            continue;
+        if semicolon.is_some() {
+            out.push(';');
         }
-        match token.text.as_str() {
-            "(" | "[" | "{" => depth += 1,
-            ")" if depth == 0 => return false,
-            ")" | "]" | "}" => depth = depth.saturating_sub(1),
-            "&&" | "||" if depth == 0 => return true,
-            _ => {},
-        }
-    }
-    false
-}
-
-/// Whether one of the tokens is a table, an array, a function or a lambda.
-fn has_block_argument(tokens: &[Token]) -> bool {
-    let mut depth = 0usize;
-    for token in tokens {
-        if matches!(token.kind, TokenKind::String | TokenKind::Comment) {
-            continue;
-        }
-        if depth == 0
-            && (matches!(token.text.as_str(), "{" | "[" | "@") || token.text == "function")
-        {
-            return true;
-        }
-        match token.text.as_str() {
-            "(" | "[" | "{" => depth += 1,
-            ")" if depth == 0 => return false,
-            ")" | "]" | "}" => depth = depth.saturating_sub(1),
-            _ => {},
-        }
-    }
-    false
-}
-
-/// Whether one of the tokens has a ',' of its own, outside any nested brackets.
-fn has_top_level_comma(tokens: &[Token]) -> bool {
-    let mut depth = 0usize;
-    for token in tokens {
-        if matches!(token.kind, TokenKind::String | TokenKind::Comment) {
-            continue;
-        }
-        match token.text.as_str() {
-            "(" | "[" | "{" => depth += 1,
-            ")" if depth == 0 => return false,
-            ")" | "]" | "}" => depth = depth.saturating_sub(1),
-            "," if depth == 0 => return true,
-            _ => {},
-        }
-    }
-    false
-}
-
-/// The tokens up to the end of the statement `remaining` starts in. Squirrel (sadly) accepts a
-/// newline as a statement separator, so we can't stop only at ';' or we would go into the next
-/// statements and measures them too.
-fn statement_slice(remaining: &[Token]) -> &[Token] {
-    let end = remaining
-        .iter()
-        .position(|t| t.starts_statement && t.preceded_by_newline)
-        .unwrap_or(remaining.len());
-    &remaining[..end]
-}
-
-/// A comment that runs to the end of its line. Squirrel accepts both forms, and whatever
-/// follows one has to be written on the next line or the code ends up commented out.
-fn is_line_comment(trimmed_text: &str) -> bool {
-    trimmed_text.starts_with("//") || trimmed_text.starts_with('#')
-}
-
-fn trim_trailing_whitespace(buffer: &mut String) {
-    while matches!(buffer.chars().last(), Some(' ') | Some('\t') | Some('\r')) {
-        buffer.pop();
-    }
-}
-
-fn trim_trailing_whitespace_line(buffer: &mut String) {
-    while matches!(buffer.chars().last(), Some(' ') | Some('\t')) {
-        buffer.pop();
-    }
-}
-
-fn collect_tokens(root: Node, source: &str) -> Result<Vec<Token>, FormatError> {
-    let mut tokens = Vec::new();
-    let mut cursor = root.walk();
-    let mut visited_children = false;
-    let bytes = source.as_bytes();
-    let mut prev_end: usize = 0;
-
-    loop {
-        let node = cursor.node();
-        // A char literal's contents are not nodes of their own: only its two quotes are. It
-        // has to be taken whole, or the character between them is dropped.
-        let is_atomic = is_atomic_literal_kind(node.kind());
-
-        if !visited_children && (node.child_count() == 0 || is_atomic) {
-            let start = node.start_byte();
-            let mut preceded_by_newline = false;
-            let mut preceding_whitespace = String::new();
-            if start > prev_end {
-                preceding_whitespace = source[prev_end..start].to_string();
-                let newline_count = preceding_whitespace
-                    .chars()
-                    .filter(|&ch| ch == '\n')
-                    .count();
-                preceded_by_newline = newline_count > 0;
-                if newline_count >= 2 {
-                    tokens.push(Token {
-                        text: String::new(),
-                        kind: TokenKind::Blankline,
-                        preceded_by_newline: true,
-                        preceding_whitespace: String::new(),
-                        starts_statement: false,
-                    });
-                }
-            }
-            let text = node
-                .utf8_text(bytes)
-                .map_err(|_| FormatError::Utf8)?
-                .to_string();
-            if !text.is_empty() {
-                let kind = if node
-                    .parent()
-                    .filter(|p| is_string_node_kind(p.kind()))
-                    .is_some()
-                {
-                    TokenKind::String
-                } else {
-                    classify_token(&node)
-                };
-                tokens.push(Token {
-                    kind,
-                    text,
-                    preceded_by_newline,
-                    preceding_whitespace,
-                    starts_statement: starts_statement(node),
-                });
-            }
-            prev_end = node.end_byte();
-        }
-
-        if !visited_children && !is_atomic && cursor.goto_first_child() {
-            visited_children = false;
-            continue;
-        }
-
-        if cursor.goto_next_sibling() {
-            visited_children = false;
-            continue;
-        }
-
-        if !cursor.goto_parent() {
-            break;
-        }
-
-        visited_children = true;
+        prev_end_row = Some(child.end_position().row);
+        prev_end_byte = semicolon.map_or(child.end_byte(), |semicolon| semicolon.end_byte());
     }
 
-    Ok(tokens)
+    out
 }
 
-/// Whether `leaf` is the first token of a statement, of a class member or of an enum entry.
-fn starts_statement(leaf: Node) -> bool {
-    let mut node = leaf;
-    loop {
-        let Some(parent) = node.parent() else {
-            return false;
+/// `collapse_empty` lets the formatter write an empty body as `{}`.
+/// An `if` needs it off, or the `else` ends up on the same line as the closing brace.
+fn render_block(node: Node, ctx: &Ctx, shape: Shape, collapse_empty: bool) -> String {
+    let inner = render_statements(node, ctx, shape.block(ctx), |_| true);
+    if inner.trim().is_empty() {
+        return if collapse_empty {
+            "{}".to_string()
+        } else {
+            format!("{{\n{}}}", ctx.indent(shape.indent))
         };
-        if node.start_byte() != leaf.start_byte() {
-            return false;
-        }
-
-        let starts_one = match parent.kind() {
-            "script" | "block" | "case_statement" | "default_statement" => node.is_named(),
-            // The labels of a switch: each one starts the statement list that follows it
-            "switch_statement" => matches!(node.kind(), "case_statement" | "default_statement"),
-            // A table's slots are separated by a ',' or (sadly) a newline
-            "table_slots" => node.is_named(),
-            // 'class' and the class name also start here, but only members are statements
-            "class_declaration" => node.kind() == "member_declaration",
-            // The entries. The enum's own name matches too, but it shares the 'enum' line,
-            // so no line break is kept for it.
-            "enum_declaration" => node.kind() == "identifier",
-            _ => false,
-        };
-        if starts_one {
-            return true;
-        }
-
-        node = parent;
     }
+    format!("{{\n{}\n{}}}", inner, ctx.indent(shape.indent))
 }
 
-fn classify_token(node: &Node) -> TokenKind {
-    let kind = node.kind();
-
-    if node.is_extra() || kind.contains("comment") {
-        return TokenKind::Comment;
+/// Writes the body of an `if`, a loop or a function.
+/// The formatter adds braces to a bare statement, so `if (x) y;` comes out `if (x) { y; }`.
+fn render_body(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    if node.kind() == "block" {
+        let block = render_block(node, ctx, shape, false);
+        return with_header_comments(node, ctx, shape, block);
     }
 
-    if is_keyword_kind(kind) {
-        return TokenKind::Keyword;
-    }
-
-    match kind {
-        "identifier" => TokenKind::Identifier,
-        "number" | "integer" | "float" | "float_literal" | "integer_literal" => TokenKind::Number,
-        "string" | "string_literal" | "raw_string" => TokenKind::String,
-        _ if node.is_named() => TokenKind::Other,
-        _ => TokenKind::Symbol,
-    }
+    let inner = shape.block(ctx);
+    let body = format!(
+        "{{\n{}{}{}\n{}}}",
+        ctx.indent(inner.indent),
+        render(node, ctx, inner),
+        semicolon_text(node),
+        ctx.indent(shape.indent)
+    );
+    with_header_comments(node, ctx, shape, body)
 }
 
-fn is_string_node_kind(kind: &str) -> bool {
-    matches!(kind, "string" | "string_literal" | "raw_string")
-}
-
-/// A literal that has to be written out as it was written in the source.
-fn is_atomic_literal_kind(kind: &str) -> bool {
-    kind == "char"
-}
-
-fn is_keyword_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "if" | "else"
-            | "for"
-            | "foreach"
-            | "while"
-            | "do"
-            | "switch"
-            | "case"
-            | "default"
-            | "break"
-            | "continue"
-            | "return"
-            | "local"
-            | "class"
-            | "enum"
-            | "const"
-            | "function"
-            | "try"
-            | "catch"
-            | "throw"
-            | "static"
-            | "yield"
-            | "in"
-            | "extends"
-            | "clone"
-            | "typeof"
-    )
-}
-
-// Only these keywords introduce code blocks directly before a '{'
-fn is_block_introducing_keyword(text: &str) -> bool {
-    matches!(
-        text,
-        "if" | "else"
-            | "for"
-            | "foreach"
-            | "while"
-            | "switch"
-            | "try"
-            | "catch"
-            | "finally"
-            | "do"
-            | "class"
-            | "enum"
-            | "function"
-    )
-}
-
-fn needs_space(prev: Option<&PrevToken>, current: &Token) -> bool {
-    let prev = match prev {
-        Some(prev) => prev,
-        None => return false,
+fn render_if(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let Some(condition) = named_child(node, 0) else {
+        return ctx.text(node).to_string();
     };
 
-    let prev_text = prev.text.as_str();
-    let curr_text = current.text.as_str();
+    let body = named_child(node, 1);
+    let newline = format!("\n{}", ctx.indent(shape.indent));
 
-    // Never insert spaces inside or around parts of string literals
-    if matches!(prev.kind, TokenKind::String)
-        || (matches!(current.kind, TokenKind::String) && prev.kind != TokenKind::Keyword)
-    {
-        return false;
+    let mut line = Line::new(ctx, shape);
+    line.put("if ");
+    let condition = render(condition, ctx, line.shape);
+    line.put(&condition);
+
+    // The formatter drops the brace to its own line when the condition needed more than
+    // one, as rustfmt does
+    if condition.contains('\n') {
+        line.put(&newline);
+    } else {
+        line.put(" ");
     }
 
-    if matches!(prev_text, "(" | "[" | "{" | "." | "::") {
-        return false;
+    if let Some(body) = body {
+        line.put(&render_body(body, ctx, shape));
     }
 
-    if matches!(curr_text, ")" | "]" | "," | ";") {
-        return false;
+    let Some(else_part) = named_child(node, 2) else {
+        return line.finish();
+    };
+
+    // The formatter leaves a comment written between the '}' and the 'else' where it was.
+    // It must then start the 'else' on the next line.
+    let between = body.map_or_else(Vec::new, |body| comments_between(node, body, else_part));
+    if between.is_empty() {
+        line.put(" ");
+    } else {
+        let mut prev_end_row = body.map(|body| body.end_position().row);
+        for comment in between {
+            line.put(if trails(comment, prev_end_row) {
+                " "
+            } else {
+                &newline
+            });
+            line.put(ctx.text(comment));
+            prev_end_row = Some(comment.end_position().row);
+        }
+        line.put(&newline);
     }
 
-    if curr_text == "::" {
-        return true;
-    }
-
-    if curr_text == "." {
-        return prev.kind == TokenKind::Keyword;
-    }
-
-    if curr_text == "(" {
-        return keyword_requires_space_before_paren(prev_text);
-    }
-
-    if curr_text == "{" {
-        return matches!(
-            prev.kind,
-            TokenKind::Identifier | TokenKind::Other | TokenKind::Keyword
-        ) || prev_text == ")";
-    }
-
-    if curr_text == "}" {
-        return false;
-    }
-
-    if is_operator(curr_text) || is_operator(prev_text) {
-        return true;
-    }
-
-    if prev.kind == TokenKind::Keyword {
-        return true;
-    }
-
-    if prev.kind == TokenKind::Identifier
-        && matches!(current.kind, TokenKind::Identifier | TokenKind::Keyword)
-    {
-        return true;
-    }
-
-    if matches!(prev.kind, TokenKind::Identifier | TokenKind::Number)
-        && current.kind == TokenKind::Number
-    {
-        return true;
-    }
-
-    if current.kind == TokenKind::Comment {
-        return true;
-    }
-
-    if prev_text == ")" && current.kind == TokenKind::Keyword {
-        return true;
-    }
-
-    if prev_text == ")" && current.kind == TokenKind::Identifier {
-        return true;
-    }
-
-    false
+    line.put(&render(else_part, ctx, shape)).finish()
 }
 
-fn keyword_requires_space_before_paren(text: &str) -> bool {
-    matches!(
-        text,
-        "if" | "for"
-            | "foreach"
-            | "while"
-            | "switch"
-            | "catch"
-            | "function"
-            | "return"
-            | "throw"
-            | "yield"
+/// The comments the source put between the body of an `if` and its `else`.
+fn comments_between<'a>(node: Node<'a>, after: Node, before: Node) -> Vec<Node<'a>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(|child| {
+            child.kind() == "comment"
+                && child.start_byte() >= after.end_byte()
+                && child.start_byte() < before.start_byte()
+        })
+        .collect()
+}
+
+/// The comments the source put immediately before `node`, among its siblings.
+fn comments_preceding(node: Node) -> Vec<Node> {
+    let mut found = Vec::new();
+    let mut previous = node.prev_sibling();
+
+    while let Some(comment) = previous {
+        if comment.kind() != "comment" {
+            break;
+        }
+        found.push(comment);
+        previous = comment.prev_sibling();
+    }
+
+    found.reverse();
+    found
+}
+
+/// Writes the comments that trailed a header, then the body below them.
+/// The formatter has to start the '{' on the next line, because a '//' comment takes the
+/// rest of its own.
+fn with_header_comments(node: Node, ctx: &Ctx, shape: Shape, body: String) -> String {
+    let comments = comments_preceding(node);
+    if comments.is_empty() {
+        return body;
+    }
+
+    let mut out = String::new();
+    for comment in comments {
+        out.push_str(ctx.text(comment));
+        out.push('\n');
+        out.push_str(&ctx.indent(shape.indent));
+    }
+    out.push_str(&body);
+    out
+}
+
+fn render_else(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let Some(body) = named_child(node, 0) else {
+        return "else".to_string();
+    };
+    if body.kind() == "if_statement" {
+        return format!("else {}", render(body, ctx, shape.after("else ")));
+    }
+    format!("else {}", render_body(body, ctx, shape))
+}
+
+/// `while (cond) body`.
+/// The formatter writes the parens itself: Squirrel requires them, and the grammar gives
+/// them no node.
+fn render_while(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let Some(condition) = named_child(node, 0) else {
+        return ctx.text(node).to_string();
+    };
+
+    let head = "while (";
+    let mut out = format!("{head}{})", render(condition, ctx, shape.after(head)));
+
+    if let Some(body) = named_child(node, 1) {
+        out.push(' ');
+        out.push_str(&render_body(body, ctx, shape));
+    }
+    out
+}
+
+/// `for (init; cond; step) body`.
+///
+/// Any clause can be empty, as in `for (local i = 0; i < 20;)`.
+/// An empty clause has no node, so the formatter rebuilds the header from the ';' tokens.
+/// Working from the clauses alone, it would write one ';' where the source had two.
+fn render_for(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let parts = named_children(node);
+    let Some((body, _)) = parts.split_last() else {
+        return ctx.text(node).to_string();
+    };
+
+    let head = "for (";
+    let at = shape.after(head);
+
+    let mut clauses = vec![String::new()];
+    let mut inside = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "(" => inside = true,
+            ")" => break,
+            ";" if inside => clauses.push(String::new()),
+            _ if inside && is_part(&child) => {
+                if let Some(clause) = clauses.last_mut() {
+                    *clause = render(child, ctx, at);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    let mut header = String::new();
+    for (index, clause) in clauses.iter().enumerate() {
+        if index > 0 {
+            header.push(';');
+            if !clause.is_empty() {
+                header.push(' ');
+            }
+        }
+        header.push_str(clause);
+    }
+
+    format!("{head}{header}) {}", render_body(*body, ctx, shape))
+}
+
+/// `try { ... } catch (e) { ... }`.
+fn render_try(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let mut line = Line::new(ctx, shape);
+    line.put("try ");
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "block" => {
+                let body = render_body(child, ctx, shape);
+                line.put(&body);
+            },
+            "catch_statement" => {
+                let handler = render_catch(child, ctx, shape);
+                line.put(" ").put(&handler);
+            },
+            _ => {},
+        }
+    }
+
+    line.finish()
+}
+
+/// `catch (e) { ... }`.
+/// The formatter writes the parens itself: the grammar gives them no node.
+fn render_catch(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let Some(caught) = named_child(node, 0) else {
+        return ctx.text(node).to_string();
+    };
+
+    let head = "catch (";
+    let mut out = format!("{head}{})", render(caught, ctx, shape.after(head)));
+
+    if let Some(body) = named_child(node, 1) {
+        out.push(' ');
+        out.push_str(&render_body(body, ctx, shape));
+    }
+    out
+}
+
+/// `enum Name { A = 1, B }`.
+///
+/// The grammar gives an entry no node of its own: a name, then an optional '=' and value.
+/// The formatter rebuilds each entry from the tokens, so it can tell one entry from the next
+/// rather than run them all together.
+fn render_enum(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let inner = shape.block(ctx);
+
+    let mut head = String::from("enum");
+    // An entry, or a comment that gets a line to itself
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    let mut inside = false;
+    let mut awaiting_value = false;
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "{" => inside = true,
+            "}" => break,
+            // The value belongs to the entry the formatter is already writing
+            "=" if inside => {
+                if let Some((entry, _)) = entries.last_mut() {
+                    entry.push_str(" = ");
+                    awaiting_value = true;
+                }
+            },
+            // A comment goes inside the braces, wherever the source put it
+            "comment" => entries.push((ctx.text(child).to_string(), false)),
+            _ if !child.is_named() => {},
+            _ if !inside => {
+                head.push(' ');
+                head.push_str(&render(child, ctx, shape));
+            },
+            _ if awaiting_value => {
+                if let Some((entry, _)) = entries.last_mut() {
+                    entry.push_str(&render(child, ctx, inner));
+                }
+                awaiting_value = false;
+            },
+            _ => entries.push((render(child, ctx, inner), true)),
+        }
+    }
+
+    if entries.is_empty() {
+        return format!("{head} {{}}");
+    }
+
+    // A short enum reads better on one line, as a short table does
+    if entries.iter().all(|(_, is_entry)| *is_entry) {
+        let joined = entries
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let one_line = format!("{head} {{ {joined} }}");
+        if shape.fits(&one_line, ctx) {
+            return one_line;
+        }
+    }
+
+    // The ',' goes after every entry but the last. A trailing one is not always accepted.
+    let last_entry = entries.iter().rposition(|(_, is_entry)| *is_entry);
+    let indent = ctx.indent(inner.indent);
+    let lines: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, (text, is_entry))| {
+            let comma = if *is_entry && Some(index) != last_entry {
+                ","
+            } else {
+                ""
+            };
+            format!("{indent}{text}{comma}")
+        })
+        .collect();
+
+    format!(
+        "{head} {{\n{}\n{}}}",
+        lines.join("\n"),
+        ctx.indent(shape.indent)
     )
 }
 
-fn is_operator(text: &str) -> bool {
-    matches!(
-        text,
-        "=" | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "%"
-            | "<-"
-            | "=="
-            | "!="
-            | "<"
-            | "<="
-            | "<=>"
-            | ">"
-            | ">="
-            | "&&"
-            | "||"
-            | "&"
-            | "|"
-            | "^"
-            | "~"
-            | "!"
-            | "+="
-            | "-="
-            | "*="
-            | "/="
-            | "%="
-            | "<<"
-            | "<<="
-            | ">>"
-            | ">>="
-            | "|="
-            | "&="
-            | "^="
-            | "in"
-            | "instanceof"
+/// `const NAME = value`.
+/// The ';' is the node's own child, so the formatter leaves it to `render_statements`.
+fn render_const(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let [name, value, ..] = named_children(node)[..] else {
+        return ctx.text(node).to_string();
+    };
+    Line::new(ctx, shape)
+        .put("const ")
+        .node(name)
+        .put(" = ")
+        .node(value)
+        .finish()
+}
+
+fn render_switch(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let Some(subject) = named_child(node, 0) else {
+        return ctx.text(node).to_string();
+    };
+
+    let head = "switch (";
+    let mut out = format!("{head}{}) {{\n", render(subject, ctx, shape.after(head)));
+    let arm_shape = shape.block(ctx);
+
+    let mut cursor = node.walk();
+    let mut prev_end_row: Option<usize> = None;
+    let mut prev_end_byte = 0;
+    for child in node.children(&mut cursor) {
+        // A comment between two arms belongs to neither, so the switch places it
+        let arm = matches!(child.kind(), "case_statement" | "default_statement");
+        if !arm && child.kind() != "comment" {
+            continue;
+        }
+
+        // The formatter keeps a comment at the end of an arm on that arm's last line
+        if !arm && trails(child, prev_end_row) {
+            out.push_str(gap(ctx, prev_end_byte, child.start_byte()));
+            out.push_str(ctx.text(child));
+            prev_end_row = Some(child.end_position().row);
+            prev_end_byte = child.end_byte();
+            continue;
+        }
+
+        if prev_end_row.is_some() {
+            out.push('\n');
+            // The formatter keeps a blank line the source set between two arms
+            if blank_before(child, prev_end_row) {
+                out.push('\n');
+            }
+        }
+        prev_end_row = Some(child.end_position().row);
+        prev_end_byte = child.end_byte();
+        out.push_str(&ctx.indent(arm_shape.indent));
+        if arm {
+            out.push_str(&render_case(child, ctx, arm_shape));
+        } else {
+            out.push_str(ctx.text(child));
+        }
+    }
+
+    out.push('\n');
+    out.push_str(&ctx.indent(shape.indent));
+    out.push('}');
+    out
+}
+
+/// Writes a case label, then its statements one level deeper.
+/// A case has no braces of its own, so the formatter does the indenting.
+fn render_case(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let label = if node.kind() == "default_statement" {
+        None
+    } else {
+        named_child(node, 0)
+    };
+
+    let mut out = match label {
+        None => "default:".to_string(),
+        Some(label) => format!("case {}:", render(label, ctx, shape.after("case "))),
+    };
+
+    // The formatter writes everything but the label as an ordinary run of statements
+    let label_id = label.map(|label| label.id());
+    let body = render_statements(node, ctx, shape.block(ctx), |child| {
+        Some(child.id()) != label_id
+    });
+    if !body.trim().is_empty() {
+        out.push('\n');
+        out.push_str(&body);
+    }
+
+    out
+}
+
+/// `(params) { body }`. Every function form ends this way.
+fn put_function_tail(line: &mut Line<'_, '_>, node: Node, shape: Shape) {
+    let ctx = line.ctx;
+    let mut parameters = None;
+    let mut body = None;
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "parameters" => parameters = Some(child),
+            "block" => body = Some(child),
+            _ => {},
+        }
+    }
+
+    let items = parameters.map(list_children).unwrap_or_default();
+    let params = render_items(&items, &ARGS, ctx, line.shape);
+    line.put(&params);
+
+    if let Some(body) = body {
+        let block = render_block(body, ctx, shape, true);
+        line.put(" ")
+            .put(&with_header_comments(body, ctx, shape, block));
+    }
+}
+
+fn render_function_declaration(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let mut line = Line::new(ctx, shape);
+    line.put("function");
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "identifier" | "deref_expression") {
+            line.put(" ").node(child);
+        }
+    }
+
+    put_function_tail(&mut line, node, shape);
+    line.finish()
+}
+
+fn render_anonymous_function(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let mut line = Line::new(ctx, shape);
+    line.put("function ");
+    put_function_tail(&mut line, node, shape);
+    line.finish()
+}
+
+fn render_class(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let mut line = Line::new(ctx, shape);
+    line.put("class");
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "extends" => {
+                line.put(" extends");
+            },
+            // The members are written below, as a run of statements.
+            // A comment goes down there with them: on this line, '//' would
+            // comment out the '{' the formatter is about to write.
+            "member_declaration" | "comment" => {},
+            _ if child.is_named() => {
+                line.put(" ").node(child);
+            },
+            _ => {},
+        }
+    }
+    line.put(" {");
+
+    let members = render_statements(node, ctx, shape.block(ctx), |child| {
+        matches!(child.kind(), "member_declaration" | "comment")
+    });
+    if members.trim().is_empty() {
+        return line.put("}").finish();
+    }
+
+    line.put("\n")
+        .put(&members)
+        .put("\n")
+        .put(&ctx.indent(shape.indent))
+        .put("}")
+        .finish()
+}
+
+/// A `name = value` pair. The formatter writes a class member and a table slot alike.
+///
+/// Four things here are anonymous tokens, so they are not among the named children.
+/// A member can be `static`, and a member can be the `constructor`, which has no name
+/// of its own. A slot can compute its key, as in `["a.b"] = 1`, and it can separate key
+/// from value with ':' instead of '=', as in `"a": 1`.
+/// The formatter reads all four off the node, or it drops them.
+fn render_slot(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let mut parts = named_children(node);
+
+    let mut cursor = node.walk();
+    let mut is_static = false;
+    let mut is_constructor = false;
+    let mut computed = false;
+    let mut colon = false;
+    for child in node.children(&mut cursor) {
+        if child.is_named() {
+            continue;
+        }
+        match child.kind() {
+            "static" => is_static = true,
+            "constructor" => is_constructor = true,
+            "[" => computed = true,
+            ":" => colon = true,
+            _ => {},
+        }
+    }
+
+    let mut line = Line::new(ctx, shape);
+
+    // A '</ ... />' attribute stands in front of the name, and is not the name itself
+    let attributed = parts.first().is_some_and(is_attribute);
+    if attributed {
+        line.put(ctx.text(parts.remove(0))).put(" ");
+    }
+    if is_static {
+        line.put("static ");
+    }
+
+    // The keyword names a constructor, and the rest of it reads as any other function
+    if is_constructor {
+        line.put("constructor");
+        put_function_tail(&mut line, node, shape);
+        return line.finish();
+    }
+
+    let Some(name) = parts.first() else {
+        return ctx.text(node).to_string();
+    };
+    if computed {
+        line.put("[").node(*name).put("]");
+    } else {
+        line.node(*name);
+    }
+    if let Some(value) = parts.get(1) {
+        line.put(if colon { ": " } else { " = " }).node(*value);
+    }
+
+    line.finish()
+}
+
+/// The punctuation the formatter uses for one kind of comma-separated list.
+#[derive(PartialEq, Eq)]
+struct ListStyle {
+    open: &'static str,
+    close: &'static str,
+    /// A space inside the delimiters when the list is on one line: `{ a = 1 }` but `[1, 2]`
+    pad: bool,
+    /// A ',' after the last item once the list is broken over lines
+    trailing_comma: bool,
+}
+
+const ARGS: ListStyle = ListStyle {
+    open: "(",
+    close: ")",
+    pad: false,
+    trailing_comma: false,
+};
+
+const ARRAY: ListStyle = ListStyle {
+    open: "[",
+    close: "]",
+    pad: false,
+    trailing_comma: true,
+};
+
+const TABLE: ListStyle = ListStyle {
+    open: "{",
+    close: "}",
+    pad: true,
+    trailing_comma: true,
+};
+
+/// Writes a comma-separated list and its delimiters.
+/// The formatter tries three layouts in order and takes the first that fits.
+fn render_items(items: &[Node], style: &ListStyle, ctx: &Ctx, shape: Shape) -> String {
+    if items.is_empty() {
+        return format!("{}{}", style.open, style.close);
+    }
+
+    // If a list contains a comment, the formatter must keep it on its line
+    if !items.iter().any(|item| item.kind() == "comment") {
+        let one_line = items_inline(items, style, ctx);
+        if shape.fits(&one_line, ctx) {
+            return one_line;
+        }
+
+        // When the list will not fit on one line, we choose to keep every item on the line and
+        // break only the last one:
+        //
+        // ```text
+        // f(a, b, function () {
+        //     ...
+        // })
+        // ```
+        //
+        // It's only done when the last item is a table, array or function, and only for arguments,
+        // it would be ugly for tables and arrays.
+        if *style == ARGS && (items.len() == 1 || last_item_is_block(items)) {
+            let packed = items_with_last_broken(items, style, ctx, shape);
+            if shape.first_line_fits(&packed, ctx) {
+                return packed;
+            }
+        }
+    }
+
+    items_one_per_line(items, style, ctx, shape)
+}
+
+/// Writes every item on one line, however long that comes out.
+fn items_inline(items: &[Node], style: &ListStyle, ctx: &Ctx) -> String {
+    let joined = items
+        .iter()
+        .map(|item| render_inline(*item, ctx))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if style.pad {
+        format!("{} {} {}", style.open, joined, style.close)
+    } else {
+        format!("{}{}{}", style.open, joined, style.close)
+    }
+}
+
+/// Writes every item on one line and lets the last one break inside itself.
+fn items_with_last_broken(items: &[Node], style: &ListStyle, ctx: &Ctx, shape: Shape) -> String {
+    let mut line = Line::new(ctx, shape);
+    line.put(style.open);
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            line.put(", ");
+        }
+        line.node(*item);
+    }
+    line.put(style.close).finish()
+}
+
+/// One output line: an item with any comment trailing it, or a comment that had a line to
+/// itself.
+struct Row {
+    text: String,
+    trailing: String,
+    is_item: bool,
+    /// A blank line the source set before this row
+    preceded_by_blank: bool,
+}
+
+impl Row {
+    fn new(text: String, is_item: bool, preceded_by_blank: bool) -> Self {
+        Self {
+            text,
+            trailing: String::new(),
+            is_item,
+            preceded_by_blank,
+        }
+    }
+}
+
+/// A table slot holding a named function, as in `function create() { ... }`.
+/// A lambda or an anonymous function does not count, only `function name()`.
+fn is_function_slot(node: Node) -> bool {
+    node.kind() == "table_slot"
+        && named_child(node, 0).is_some_and(|child| child.kind() == "function_declaration")
+}
+
+/// Writes one item per line, one level deeper.
+fn items_one_per_line(items: &[Node], style: &ListStyle, ctx: &Ctx, shape: Shape) -> String {
+    let inner = shape.block(ctx);
+    let indent = ctx.indent(inner.indent);
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut prev_end_row: Option<usize> = None;
+    let mut prev_end_byte = 0;
+
+    for item in items {
+        // The formatter puts a blank line above a named function, so a table of them
+        // reads as a list of methods
+        let blank =
+            blank_before(*item, prev_end_row) || (!rows.is_empty() && is_function_slot(*item));
+        match rows.last_mut() {
+            // The formatter keeps a comment at the end of an item on that item's line
+            Some(row) if item.kind() == "comment" && trails(*item, prev_end_row) => {
+                row.trailing
+                    .push_str(gap(ctx, prev_end_byte, item.start_byte()));
+                row.trailing.push_str(ctx.text(*item));
+            },
+            _ if item.kind() == "comment" => {
+                rows.push(Row::new(ctx.text(*item).to_string(), false, blank));
+            },
+            _ => rows.push(Row::new(render(*item, ctx, inner), true, blank)),
+        }
+        prev_end_row = Some(item.end_position().row);
+        prev_end_byte = item.end_byte();
+    }
+
+    // The formatter writes the ',' after the item and before its comment.
+    // Every item takes one but the last, which takes one only if the style says so.
+    let last_item = rows.iter().rposition(|row| row.is_item);
+    let lines: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let comma = if row.is_item && (Some(index) != last_item || style.trailing_comma) {
+                ","
+            } else {
+                ""
+            };
+            let blank = if row.preceded_by_blank { "\n" } else { "" };
+            format!("{blank}{indent}{}{comma}{}", row.text, row.trailing)
+        })
+        .collect();
+
+    format!(
+        "{}\n{}\n{}{}",
+        style.open,
+        lines.join("\n"),
+        ctx.indent(shape.indent),
+        style.close
     )
 }
 
-fn is_unary_operator(text: &str) -> bool {
-    matches!(text, "-" | "+" | "!" | "~")
-}
-
-fn is_unary_context(prev: Option<&PrevToken>) -> bool {
-    match prev {
-        None => true,
-        Some(prev) => {
-            let text = prev.text.as_str();
+fn last_item_is_block(items: &[Node]) -> bool {
+    items
+        .iter()
+        .rev()
+        .find(|item| item.kind() != "comment")
+        .is_some_and(|item| {
             matches!(
-                text,
-                "(" | "["
-                    | "{"
-                    | ","
-                    | ";"
-                    | "="
-                    | "+="
-                    | "-="
-                    | "*="
-                    | "/="
-                    | "%="
-                    | "=="
-                    | "!="
-                    | "<"
-                    | "<="
-                    | ">"
-                    | ">="
-                    | "&&"
-                    | "||"
-                    | "&"
-                    | "|"
-                    | "^"
-                    | "?"
-                    | ":"
-            ) || is_operator(text)
-                || matches!(prev.kind, TokenKind::Keyword)
-        },
+                item.kind(),
+                "table"
+                    | "array"
+                    | "anonymous_function"
+                    | "lambda_expression"
+                    | "function_declaration"
+            )
+        })
+}
+
+/// A binary chain, flattened so `a && b && c` is three operands and not two nestings.
+/// There is always a first operand, and each later one carries the operator in front of it.
+struct Chain<'tree, 'src> {
+    head: Node<'tree>,
+    rest: Vec<(&'src str, Node<'tree>)>,
+}
+
+impl<'tree, 'src> Chain<'tree, 'src> {
+    fn leaf(node: Node<'tree>) -> Self {
+        Self {
+            head: node,
+            rest: Vec::new(),
+        }
     }
+
+    /// Collects the operands of a run of operators of the same precedence.
+    fn flatten(node: Node<'tree>, ctx: &Ctx<'src>) -> Self {
+        let Some(operator) = binary_operator(node, ctx) else {
+            return Self::leaf(node);
+        };
+        let (Some(left), Some(right)) = (named_child(node, 0), named_child(node, 1)) else {
+            return Self::leaf(node);
+        };
+
+        let same_precedence = binary_operator(left, ctx)
+            .is_some_and(|left_op| precedence(left_op) == precedence(operator));
+        let mut chain = if same_precedence {
+            Self::flatten(left, ctx)
+        } else {
+            Self::leaf(left)
+        };
+
+        chain.rest.push((operator, right));
+        chain
+    }
+}
+
+/// The formatter breaks a chain at every operator, or at none of them.
+/// That stops a mixed `&&` and `||` from breaking inconsistently.
+fn render_binary(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let chain = Chain::flatten(node, ctx);
+
+    // Built from the operands, never from this node.
+    // Asking whether this node fits would put the formatter back where it started, forever.
+    let mut one_line = render_inline(chain.head, ctx);
+    for (operator, operand) in &chain.rest {
+        one_line.push(' ');
+        one_line.push_str(operator);
+        one_line.push(' ');
+        one_line.push_str(&render_inline(*operand, ctx));
+    }
+    if shape.fits(&one_line, ctx) {
+        return one_line;
+    }
+
+    let inner = shape.block(ctx);
+    let indent = ctx.indent(inner.indent);
+    let mut out = render(chain.head, ctx, shape);
+
+    for (operator, operand) in &chain.rest {
+        let head = format!("{operator} ");
+        out.push('\n');
+        out.push_str(&indent);
+        out.push_str(&head);
+        out.push_str(&render(*operand, ctx, inner.after(&head)));
+    }
+
+    if shape.widest(&out) >= shape.widest(&one_line) {
+        return one_line;
+    }
+    out
+}
+
+fn binary_operator<'a>(node: Node, ctx: &Ctx<'a>) -> Option<&'a str> {
+    if node.kind() != "binary_expression" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find(|child| !child.is_named())
+        .map(|child| ctx.text(child))
+}
+
+fn precedence(operator: &str) -> u8 {
+    match operator {
+        "||" => 1,
+        "&&" => 2,
+        "|" => 3,
+        "^" => 4,
+        "&" => 5,
+        "==" | "!=" | "<=>" => 6,
+        "<" | ">" | "<=" | ">=" => 7,
+        "<<" | ">>" | ">>>" => 8,
+        "+" | "-" => 9,
+        "*" | "/" | "%" => 10,
+        _ => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+/// Renders a node on a single line, however long that line comes out.
+fn render_inline(node: Node, ctx: &Ctx) -> String {
+    render(node, ctx, Shape::unbounded())
+}
+
+fn render(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    // The parser invents tokens a half-typed file is missing, such as an unclosed table's '}',
+    // and it gives up outright on source it cannot fit the grammar.
+    // The formatter would then write code nobody typed, so it copies the source instead.
+    if parser_gave_up(node) {
+        return ctx.text(node).to_string();
+    }
+
+    let rendered = dispatch(node, ctx, shape);
+
+    // A renderer takes its node apart, and some have nowhere to put a comment the source
+    // wedged inside. Copying the node keeps that comment, and keeps a '//' from swallowing
+    // the code the formatter would have written after it.
+    if drops_a_comment(node, ctx, &rendered) {
+        return ctx.text(node).to_string();
+    }
+
+    rendered
+}
+
+fn dispatch(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    match node.kind() {
+        "script" => render_statements(node, ctx, shape, |_| true),
+        "block" => render_block(node, ctx, shape, true),
+
+        "if_statement" => render_if(node, ctx, shape),
+        "else_statement" => render_else(node, ctx, shape),
+        "while_statement" => render_while(node, ctx, shape),
+        "for_statement" => render_for(node, ctx, shape),
+        "foreach_statement" => render_foreach(node, ctx, shape),
+        "do_while_statement" => render_do_while(node, ctx, shape),
+        "switch_statement" => render_switch(node, ctx, shape),
+        "case_statement" | "default_statement" => render_case(node, ctx, shape),
+        "try_statement" => render_try(node, ctx, shape),
+        "catch_statement" => render_catch(node, ctx, shape),
+
+        "function_declaration" => render_function_declaration(node, ctx, shape),
+        "class_declaration" => render_class(node, ctx, shape),
+        "member_declaration" | "table_slot" => render_slot(node, ctx, shape),
+
+        "local_declaration" => render_local(node, ctx, shape),
+        "const_declaration" => render_const(node, ctx, shape),
+        "enum_declaration" => render_enum(node, ctx, shape),
+        "assignment_expression" => render_assignment(node, ctx, shape),
+        "return" | "return_statement" => render_prefixed(node, ctx, shape, "return"),
+        "throw_statement" => render_prefixed(node, ctx, shape, "throw"),
+        // Each of these holds its own ';', which render_statements writes
+        "yield" => render_prefixed(node, ctx, shape, "yield"),
+        "delete_expression" => render_prefixed(node, ctx, shape, "delete"),
+        "resume_expression" => render_prefixed(node, ctx, shape, "resume"),
+        // The keyword node holds its own ';', which render_statements has already written
+        "break" | "continue" => render_prefixed(node, ctx, shape, node.kind()),
+
+        "binary_expression" => render_binary(node, ctx, shape),
+        "ternary_expression" => render_ternary(node, ctx, shape),
+        "unary_expression" | "update_expression" | "clone_expression" => {
+            render_tight(node, ctx, shape)
+        },
+        "parenthesized_expression" => render_parenthesized(node, ctx, shape),
+        "call_expression" => render_call(node, ctx, shape),
+        "index_expression" => render_index(node, ctx, shape),
+        "deref_expression" => render_deref(node, ctx, shape),
+        "array" => render_items(&list_children(node), &ARRAY, ctx, shape),
+        "table" => render_table(node, ctx, shape),
+        "anonymous_function" => render_anonymous_function(node, ctx, shape),
+        "lambda_expression" => render_lambda(node, ctx, shape),
+        "parameters" | "call_args" => render_items(&list_children(node), &ARGS, ctx, shape),
+        "parameter" => ctx.text(node).to_string(),
+
+        // Literals, identifiers, comments and anything the dispatch does not know yet
+        _ => ctx.text(node).to_string(),
+    }
+}
+
+/// `local a = 1`, and the comma form `local a = 1, b = 2`.
+/// The ',' and the '=' are anonymous tokens, so the formatter reads them off the node.
+/// Joining every named child with " = " would turn the comma form into one long assignment.
+fn render_local(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let mut line = Line::new(ctx, shape);
+    line.put("local ");
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "=" => line.put(" = "),
+            "," => line.put(", "),
+            _ if is_part(&child) => line.node(child),
+            _ => &mut line,
+        };
+    }
+
+    line.finish()
+}
+
+fn render_assignment(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let [target, value, ..] = named_children(node)[..] else {
+        return ctx.text(node).to_string();
+    };
+    Line::new(ctx, shape)
+        .node(target)
+        .put(" ")
+        .put(assignment_operator(node, ctx))
+        .put(" ")
+        .node(value)
+        .finish()
+}
+
+fn assignment_operator<'a>(node: Node, ctx: &Ctx<'a>) -> &'a str {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find(|child| !child.is_named())
+        .map_or("=", |child| ctx.text(child))
+}
+
+fn render_prefixed(node: Node, ctx: &Ctx, shape: Shape, keyword: &str) -> String {
+    match named_child(node, 0) {
+        None => keyword.to_string(),
+        Some(value) => Line::new(ctx, shape)
+            .put(keyword)
+            .put(" ")
+            .node(value)
+            .finish(),
+    }
+}
+
+fn render_call(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let Some(callee) = named_child(node, 0) else {
+        return ctx.text(node).to_string();
+    };
+
+    let items = node
+        .children(&mut node.walk())
+        .find(|child| child.kind() == "call_args")
+        .map(list_children)
+        .unwrap_or_default();
+
+    let mut line = Line::new(ctx, shape);
+    line.node(callee);
+    let args = render_items(&items, &ARGS, ctx, line.shape);
+    line.put(&args).finish()
+}
+
+fn render_index(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let [target, key, ..] = named_children(node)[..] else {
+        return ctx.text(node).to_string();
+    };
+    Line::new(ctx, shape)
+        .node(target)
+        .put("[")
+        .node(key)
+        .put("]")
+        .finish()
+}
+
+fn render_deref(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let [target, field, ..] = named_children(node)[..] else {
+        return ctx.text(node).to_string();
+    };
+    Line::new(ctx, shape)
+        .node(target)
+        .put(".")
+        .node(field)
+        .finish()
+}
+
+fn render_parenthesized(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    match named_child(node, 0) {
+        None => "()".to_string(),
+        Some(inner) => Line::new(ctx, shape).put("(").node(inner).put(")").finish(),
+    }
+}
+
+fn render_table(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let slots: Vec<Node> = node
+        .children(&mut node.walk())
+        .filter(|child| child.kind() == "table_slots")
+        .flat_map(list_children)
+        .collect();
+    render_items(&slots, &TABLE, ctx, shape)
+}
+
+fn render_lambda(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let mut value = None;
+    let mut parameters = None;
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "parameters" => parameters = Some(child),
+            _ if child.is_named() => value = Some(child),
+            _ => {},
+        }
+    }
+
+    let items = parameters.map(list_children).unwrap_or_default();
+    let mut line = Line::new(ctx, shape);
+    line.put("@");
+    let params = render_items(&items, &ARGS, ctx, line.shape);
+    line.put(&params);
+
+    if value.is_some() {
+        line.put(" ");
+    }
+    line.opt_node(value).finish()
+}
+
+fn render_ternary(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let parts = named_children(node);
+    if parts.len() < 3 {
+        return ctx.text(node).to_string();
+    }
+
+    let one_line = format!(
+        "{} ? {} : {}",
+        render_inline(parts[0], ctx),
+        render_inline(parts[1], ctx),
+        render_inline(parts[2], ctx)
+    );
+    if shape.fits(&one_line, ctx) {
+        return one_line;
+    }
+
+    let inner = shape.block(ctx);
+    let indent = ctx.indent(inner.indent);
+    format!(
+        "{}\n{}? {}\n{}: {}",
+        render(parts[0], ctx, shape),
+        indent,
+        render(parts[1], ctx, inner.after("? ")),
+        indent,
+        render(parts[2], ctx, inner.after(": "))
+    )
+}
+
+/// An operator the grammar gives no node of its own: `!x`, `-x`, `x++`, `clone x`, `x <- 1`.
+/// With one operand the formatter writes the operator tight against it.
+/// With two, such as `<-`, it puts a space either side.
+/// After a word like `clone` it adds a space, unless a paren follows: `typeof(x)` stays tight.
+fn render_tight(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let binary = named_child_count(node) >= 2;
+    let mut line = Line::new(ctx, shape);
+    let mut cursor = node.walk();
+
+    for child in node.children(&mut cursor) {
+        if child.is_named() {
+            line.node(child);
+            continue;
+        }
+
+        let text = ctx.text(child);
+        let parenthesized = child
+            .next_sibling()
+            .is_some_and(|next| ctx.text(next).starts_with('('));
+
+        if binary {
+            line.put(" ").put(text).put(" ");
+        } else if text.chars().all(char::is_alphabetic) && !parenthesized {
+            line.put(text).put(" ");
+        } else {
+            line.put(text);
+        }
+    }
+
+    line.finish()
+}
+
+fn render_foreach(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let parts = named_children(node);
+    let Some((body, head)) = parts.split_last() else {
+        return ctx.text(node).to_string();
+    };
+    let Some((sequence, names)) = head.split_last() else {
+        return ctx.text(node).to_string();
+    };
+
+    let names: Vec<String> = names.iter().map(|name| render(*name, ctx, shape)).collect();
+
+    format!(
+        "foreach ({} in {}) {}",
+        names.join(", "),
+        render(*sequence, ctx, shape),
+        render_body(*body, ctx, shape)
+    )
+}
+
+fn render_do_while(node: Node, ctx: &Ctx, shape: Shape) -> String {
+    let parts = named_children(node);
+    if parts.len() < 2 {
+        return ctx.text(node).to_string();
+    }
+    format!(
+        "do {} while ({})",
+        render_body(parts[0], ctx, shape),
+        render(parts[1], ctx, shape)
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Tree helpers
+// ---------------------------------------------------------------------------
+
+/// Whether the parser could not read this node as the grammar says it should be.
+/// Either it invented a token the source does not have, such as an unclosed table's '}',
+/// or it gave up on a run of source it could not fit the grammar at all.
+/// Either way the tree no longer says what the source says, and a renderer working from
+/// it writes something else again. The formatter copies such a node instead.
+fn parser_gave_up(node: Node) -> bool {
+    if node.is_error() || node.is_missing() {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| child.is_missing() || child.is_error())
+}
+
+/// Whether `rendered` lost a comment the source wrote inside `node`.
+/// The formatter asks after the fact, rather than keep a list of the renderers that
+/// know what to do with one: a renderer that learns to place a comment stops answering
+/// yes on its own.
+fn drops_a_comment(node: Node, ctx: &Ctx, rendered: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(|child| child.kind() == "comment")
+        .any(|comment| !rendered.contains(ctx.text(comment)))
+}
+
+/// The `</ ... />` a member can carry in front of its name.
+fn is_attribute(node: &Node) -> bool {
+    node.kind() == "attribute_declaration"
+}
+
+/// A child a renderer takes apart: named, and not a comment.
+/// The formatter places comments from where the source put them, not from the node's shape.
+fn is_part(node: &Node) -> bool {
+    node.is_named() && node.kind() != "comment"
+}
+
+fn named_child(node: Node, index: usize) -> Option<Node> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).filter(is_part).nth(index)
+}
+
+fn named_children(node: Node) -> Vec<Node> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).filter(is_part).collect()
+}
+
+fn named_child_count(node: Node) -> usize {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).filter(is_part).count()
+}
+
+/// The children of a list, comments included.
+fn list_children(node: Node) -> Vec<Node> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(tree_sitter::Node::is_named)
+        .collect()
 }

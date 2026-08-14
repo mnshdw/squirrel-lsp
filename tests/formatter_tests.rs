@@ -42,5 +42,9 @@ fn test_formatter() {
         let output = format_document(&input, &options)
             .unwrap_or_else(|e| panic!("formatting failed for {}: {}", file_name, e));
         assert_eq!(output, expected, "mismatch for case: {}", file_name);
+
+        let again = format_document(&output, &options)
+            .unwrap_or_else(|e| panic!("reformatting failed for {}: {}", file_name, e));
+        assert_eq!(again, output, "not idempotent for case: {}", file_name);
     }
 }

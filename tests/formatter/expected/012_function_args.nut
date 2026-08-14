@@ -4,11 +4,7 @@
 		Quantity = 50,
 		LifeTimeQuantity = 0,
 		SpawnRate = 10,
-		Brushes = [
-			"effect_lightning_01",
-			"effect_lightning_02",
-			"effect_lightning_03"
-		],
+		Brushes = ["effect_lightning_01", "effect_lightning_02", "effect_lightning_03"],
 		Stages = [
 			{
 				LifeTimeMin = 0.75,
@@ -29,7 +25,7 @@
 				SpawnOffsetMax = ::createVec(50, 40),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false
+				FlickerEffect = false,
 			},
 			{
 				LifeTimeMin = 4.0,
@@ -44,7 +40,7 @@
 				DirectionMax = ::createVec(0.400000006, -0.600000024),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false
+				FlickerEffect = false,
 			},
 			{
 				LifeTimeMin = 0.5,
@@ -57,19 +53,16 @@
 				VelocityMax = 30,
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false
-			}
-		]
+				FlickerEffect = false,
+			},
+		],
 	},
 	{
 		Delay = 0,
 		Quantity = 50,
 		LifeTimeQuantity = 0,
 		SpawnRate = 8,
-		Brushes = [
-			"miasma_effect_02",
-			"miasma_effect_03"
-		],
+		Brushes = ["miasma_effect_02", "miasma_effect_03"],
 		Stages = [
 			{
 				LifeTimeMin = 0.75,
@@ -90,7 +83,7 @@
 				SpawnOffsetMax = ::createVec(50, 40),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false
+				FlickerEffect = false,
 			},
 			{
 				LifeTimeMin = 4.0,
@@ -105,7 +98,7 @@
 				DirectionMax = ::createVec(0.200000003, -0.300000012),
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false
+				FlickerEffect = false,
 			},
 			{
 				LifeTimeMin = 0.5,
@@ -118,8 +111,8 @@
 				VelocityMax = 30,
 				ForceMin = ::createVec(0, 0),
 				ForceMax = ::createVec(0, 10),
-				FlickerEffect = false
-			}
-		]
-	}
+				FlickerEffect = false,
+			},
+		],
+	},
 ];

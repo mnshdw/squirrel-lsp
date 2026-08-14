@@ -6,13 +6,7 @@ local addEntity = function (_type, _name, _namePlural = null, _icon = null) {
 	::Const.Strings.EntityName.push(_name);
 };
 
-local ret = [
-	{
-		id = 1,
-		type = "title",
-		text = this.getName() + (isWeakened ? " (Weakened)" : "")
-	}
-];
+local ret = [{ id = 1, type = "title", text = this.getName() + (isWeakened ? " (Weakened)" : "") }];
 
 _properties.MovementAPCostAdditional += isWeakened
 	? this.m.ApCostReductionWeakened

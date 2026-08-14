@@ -10,8 +10,10 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.m.IsFixedLook = true;
 		this.m.StartingRosterTier = this.Const.Roster.getTierForSize(3);
 		this.m.StartingBusinessReputation = 50;
-		this.setRosterReputationTiers(this.Const.Roster.createReputationTiers(this.m.StartingBusinessReputation));
-	}
+		this.setRosterReputationTiers(this.Const.Roster.createReputationTiers(
+			this.m.StartingBusinessReputation
+		));
+	},
 
 	function onSpawnAssets() {
 		local roster = this.World.getPlayerRoster();
@@ -38,27 +40,29 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 
 		local bros = roster.getAll(); //starting party
 		local talents;
-		bros[0].setStartValuesEx([
-			"legend_ranger_commander_background"
-		]);
+		bros[0].setStartValuesEx(["legend_ranger_commander_background"]);
 		bros[0].getBackground().m.RawDescription = "{%name% grew up in the rangers and was taught the ways of the forest by veteran foresters. Running through the woods for a lifetime has made %name% particularly good at tracking enemies, or tumbling into the homes of wild druids trying to escape from the modern world}";
 		::Legends.Traits.grant(bros[0], ::Legends.Trait.Player);
 		this.addScenarioPerk(bros[0].getBackground(), this.Const.Perks.PerkDefs.Pathfinder);
-		this.addScenarioPerk(bros[0].getBackground(), this.Const.Perks.PerkDefs.LegendTacticalManeuvers);
+		this.addScenarioPerk(
+			bros[0].getBackground(),
+			this.Const.Perks.PerkDefs.LegendTacticalManeuvers
+		);
 		bros[0].improveMood(1.5, "Narrowly escaped a bear");
 		bros[0].addLightInjury();
 		bros[0].getFlags().set("IsPlayerCharacter", true);
 		bros[0].setPlaceInFormation(3);
 		bros[0].setVeteranPerks(2);
 
-		bros[1].setStartValuesEx([
-			"legend_druid_commander_background"
-		]);
+		bros[1].setStartValuesEx(["legend_druid_commander_background"]);
 		bros[1].getBackground().m.RawDescription = "{%name% was the bastard of a noblewoman who left them in a ditch at the edge of the forest to be taken by wolves. It worked, but instead left %name% being cared for by a wolfmother with no cubs of her own. When the she-wolf was slain by vengeful poachers %name% took it upon themselves to be as far away from society as possible. Right up until a certain ranger fell headfirst into their hovel}";
 
 		::Legends.Traits.grant(bros[1], ::Legends.Trait.Player);
 		this.addScenarioPerk(bros[1].getBackground(), this.Const.Perks.PerkDefs.Pathfinder);
-		this.addScenarioPerk(bros[1].getBackground(), this.Const.Perks.PerkDefs.LegendTacticalManeuvers);
+		this.addScenarioPerk(
+			bros[1].getBackground(),
+			this.Const.Perks.PerkDefs.LegendTacticalManeuvers
+		);
 		bros[1].worsenMood(1.5, "Had my home destroyed by an idiot");
 		bros[1].getFlags().set("IsPlayerCharacter", true);
 		bros[1].setPlaceInFormation(4);
@@ -68,7 +72,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.World.Assets.getStash().add(this.new("scripts/items/trade/furs_item"));
 		this.World.Assets.m.ArmorParts = this.World.Assets.m.ArmorParts / 2;
 		this.World.Assets.m.Ammo = this.World.Assets.m.Ammo * 2;
-	}
+	},
 
 	function onSpawnPlayer() //forest spawn
 	{
@@ -132,20 +136,29 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.World.getCamera().setPos(this.World.State.m.Player.getPos());
 		local f = nearestVillage.getFactionOfType(this.Const.FactionType.NobleHouse);
 		f.addPlayerRelation(-20.0, "Heard rumors of you poaching in their woods");
-		this.Time.scheduleEvent(this.TimeUnit.Real, 1000, function (_tag) {
-			this.Music.setTrackList(this.Const.Music.IntroTracks, this.Const.Music.CrossFadeTime);
-			this.World.Events.fire("event.legend_ranger_scenario_intro");
-		}, null);
-	}
+		this.Time.scheduleEvent(
+			this.TimeUnit.Real,
+			1000,
+			function (_tag) {
+				this.Music.setTrackList(
+					this.Const.Music.IntroTracks,
+					this.Const.Music.CrossFadeTime
+				);
+				this.World.Events.fire("event.legend_ranger_scenario_intro");
+			},
+			null
+		);
+	},
 
 	function onInit() {
 		this.starting_scenario.onInit();
 		this.World.Flags.set("IsLegendsHunter", true);
 		this.World.Flags.set("IsLegendsDruid", true);
-	}
+	},
+
 	function getMovementSpeedMult() {
 		return 1.057;
-	}
+	},
 
 	function onCombatFinished() {
 		local roster = this.World.getPlayerRoster().getAll();
@@ -169,7 +182,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		}
 
 		return rangers != 0;
-	}
+	},
 
 	function onUpdateHiringRoster(_roster) {
 		this.addBroToRoster(_roster, "poacher_background", 6);
@@ -178,8 +191,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		this.addBroToRoster(_roster, "hunter_background", 6);
 		this.addBroToRoster(_roster, "legend_herbalist_background", 8);
 		this.addBroToRoster(_roster, "legend_ranger_background", 9);
-
-	}
+	},
 
 	function onHiredByScenario(bro) {
 		if (bro.getBackground().isBackgroundType(this.Const.BackgroundType.Druid)
@@ -190,7 +202,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 		} else {
 			bro.worsenMood(2.0, "Does not like sleeping in the woods");
 		}
-	}
+	},
 
 	function onGenerateBro(bro) {
 		if (bro.getBackground().isBackgroundType(this.Const.BackgroundType.Druid)
@@ -204,7 +216,7 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 			bro.getBaseProperties().DailyWageMult *= 1.25; //1.0 = default
 			bro.getSkills().update();
 		}
-	}
+	},
 
 	function onBuildPerkTree(_background) {
 		this.addScenarioPerk(
@@ -214,5 +226,5 @@ this.legends_rangers_scenario <- this.inherit("scripts/scenarios/world/starting_
 			_background.isBackgroundType(this.Const.BackgroundType.Druid)
 				|| _background.isBackgroundType(this.Const.BackgroundType.Ranger)
 		);
-	}
+	},
 });

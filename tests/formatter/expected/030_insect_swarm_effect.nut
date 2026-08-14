@@ -11,7 +11,10 @@
 			|| crrd)
 		{
 			if (!this.getContainer().getActor().isHiddenToPlayer()) {
-				this.Tactical.EventLog.log(this.Const.UI.getColorizedEntityName(this.getContainer().getActor()) + " repels insects with his unnatural physiology");
+				this.Tactical.EventLog.log(this.Const.UI.getColorizedEntityName(
+					this.getContainer().getActor()
+				)
+					+ " repels insects with his unnatural physiology");
 			}
 
 			this.removeSelf();
@@ -20,7 +23,11 @@
 				1,
 				3 + this.getContainer().getActor().getCurrentProperties().NegativeStatusEffectDuration
 			);
-			this.Sound.play(this.m.SoundOnUse[this.Math.rand(0, this.m.SoundOnUse.len() - 1)], this.Const.Sound.Volume.Skill, this.getContainer().getActor().getPos());
+			this.Sound.play(
+				this.m.SoundOnUse[this.Math.rand(0, this.m.SoundOnUse.len() - 1)],
+				this.Const.Sound.Volume.Skill,
+				this.getContainer().getActor().getPos()
+			);
 			local actor = this.getContainer().getActor();
 			this.addSprite(1, "bust_flies_01");
 			this.addSprite(2, "bust_flies_02");
@@ -61,7 +68,9 @@
 		}
 
 		/*
+
 		//If you want to keep the SSU resilient effect (important it only works with the ssu perk, not vanilla resilient) which reduces debuff effectiveness by 25% (multiplicative)
+
 		local enemyMult = 80;
 		local broMult = 50;
 		if (this.getContainer().hasSkill("perk.crresilient"))
@@ -85,6 +94,5 @@
 			_properties.RangedDefenseMult *= broMult * 0.01;
 			_properties.InitiativeMult *= broMult * 0.01;
 		}*/
-
 	}
 });
