@@ -66,9 +66,12 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     debug: debugExecutable,
   };
 
+  const maxWidth = vscode.workspace.getConfiguration("squirrelLsp").get<number>("maxWidth");
+
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ language: "squirrel" }],
     outputChannelName: "Squirrel Language Server",
+    initializationOptions: { maxWidth },
   };
 
   client = new LanguageClient(

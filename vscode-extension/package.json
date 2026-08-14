@@ -57,6 +57,12 @@
           "type": "string",
           "default": "",
           "description": "Absolute path to the squirrel-lsp executable. Leave empty to look for 'squirrel-lsp' in PATH."
+        },
+        "squirrelLsp.maxWidth": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "description": "Column the formatter wraps at. Takes effect after restarting the server."
         }
       }
     }

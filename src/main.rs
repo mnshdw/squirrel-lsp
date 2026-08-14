@@ -44,6 +44,7 @@ struct Backend {
     documents: Arc<RwLock<HashMap<Url, String>>>,
     workspace: Arc<RwLock<Workspace>>,
     workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
+    max_width: Arc<RwLock<usize>>,
 }
 
 impl Backend {
@@ -53,6 +54,7 @@ impl Backend {
             documents: Arc::new(RwLock::new(HashMap::new())),
             workspace: Arc::new(RwLock::new(Workspace::new())),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
+            max_width: Arc::new(RwLock::new(FormatOptions::default().max_width)),
         }
     }
 
@@ -193,7 +195,10 @@ impl Backend {
         store.get(uri).cloned()
     }
 
-    fn map_formatting_options(options: &tower_lsp::lsp_types::FormattingOptions) -> FormatOptions {
+    fn map_formatting_options(
+        options: &tower_lsp::lsp_types::FormattingOptions,
+        max_width: usize,
+    ) -> FormatOptions {
         let tab_width = std::cmp::max(1, options.tab_size as usize);
         let indent_style = if options.insert_spaces {
             IndentStyle::Spaces(tab_width)
@@ -204,7 +209,13 @@ impl Backend {
         let mut format_options = FormatOptions::with_indent(indent_style);
         format_options.insert_final_newline = options.insert_final_newline.unwrap_or(true);
         format_options.trim_trailing_whitespace = options.trim_trailing_whitespace.unwrap_or(true);
+        format_options.max_width = max_width;
         format_options
+    }
+
+    fn configured_max_width(options: Option<&serde_json::Value>) -> Option<usize> {
+        let width = options?.get("maxWidth")?.as_u64()?;
+        usize::try_from(width).ok().filter(|width| *width > 0)
     }
 
     async fn handle_format_request(
@@ -217,7 +228,8 @@ impl Backend {
             None => return Ok(None),
         };
 
-        let options = Self::map_formatting_options(&params.options);
+        let max_width = *self.max_width.read().await;
+        let options = Self::map_formatting_options(&params.options, max_width);
         match format_document(&original, &options) {
             Ok(formatted) => {
                 if formatted == original {
@@ -244,6 +256,10 @@ impl Backend {
 #[async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        if let Some(width) = Self::configured_max_width(params.initialization_options.as_ref()) {
+            *self.max_width.write().await = width;
+        }
+
         // Store workspace folders for later indexing
         let mut folders = self.workspace_folders.write().await;
         if let Some(workspace_folders) = params.workspace_folders {

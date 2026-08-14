@@ -286,6 +286,43 @@ fn trails(comment: Node, prev_end_row: Option<usize>) -> bool {
     prev_end_row == Some(comment.start_position().row)
 }
 
+/// Reads a `// fmt: off` or `// fmt: on` marker.
+/// The '*' trimming lets `/* fmt: off */` work too.
+fn fmt_marker(ctx: &Ctx, node: Node) -> Option<bool> {
+    if node.kind() != "comment" {
+        return None;
+    }
+    let body = ctx
+        .text(node)
+        .trim_matches(['/', '*'])
+        .trim()
+        .replace(' ', "");
+
+    match body.as_str() {
+        "fmt:off" => Some(false),
+        "fmt:on" => Some(true),
+        _ => None,
+    }
+}
+
+/// How far a `// fmt: off` reaches.
+fn fmt_region_end(ctx: &Ctx, start: Node) -> usize {
+    let mut end = start.end_byte();
+    let mut next = start.next_sibling();
+
+    while let Some(node) = next {
+        if matches!(node.kind(), "}" | ")" | "]") {
+            break;
+        }
+        end = node.end_byte();
+        if fmt_marker(ctx, node) == Some(true) {
+            break;
+        }
+        next = node.next_sibling();
+    }
+    end
+}
+
 /// Writes the children of a `script`, a `block` or a class body, one per line.
 fn render_statements(parent: Node, ctx: &Ctx, shape: Shape, keep: impl Fn(Node) -> bool) -> String {
     let indent = ctx.indent(shape.indent);
@@ -301,9 +338,33 @@ fn render_statements(parent: Node, ctx: &Ctx, shape: Shape, keep: impl Fn(Node) 
         .find(|child| child.kind() == "{")
         .map(|brace| brace.end_position().row);
 
+    // Everything up to here has been copied out under a '// fmt: off'
+    let mut copied_to = 0;
+
     let mut cursor = parent.walk();
     for child in parent.children(&mut cursor) {
+        if child.start_byte() < copied_to {
+            continue;
+        }
         if !child.is_named() || !keep(child) {
+            continue;
+        }
+
+        // Between '// fmt: off' and '// fmt: on' the source stands as the author wrote it
+        if fmt_marker(ctx, child) == Some(false) {
+            let end = fmt_region_end(ctx, child);
+            if prev_end_row.is_some() {
+                out.push('\n');
+                if blank_before(child, prev_end_row) {
+                    out.push('\n');
+                }
+            }
+            out.push_str(&indent);
+            out.push_str(&ctx.source[child.start_byte()..end]);
+
+            prev_end_row = Some(ctx.source[..end].lines().count().saturating_sub(1));
+            prev_end_byte = end;
+            copied_to = end;
             continue;
         }
 
@@ -1067,12 +1128,11 @@ fn items_one_per_line(items: &[Node], style: &ListStyle, ctx: &Ctx, shape: Shape
     let mut rows: Vec<Row> = Vec::new();
     let mut prev_end_row: Option<usize> = None;
     let mut prev_end_byte = 0;
+    // Where the run of comments sitting directly above the next item starts
+    let mut comments_start: Option<usize> = None;
 
     for item in items {
-        // The formatter puts a blank line above a named function, so a table of them
-        // reads as a list of methods
-        let blank =
-            blank_before(*item, prev_end_row) || (!rows.is_empty() && is_function_slot(*item));
+        let blank = blank_before(*item, prev_end_row);
         match rows.last_mut() {
             // The formatter keeps a comment at the end of an item on that item's line
             Some(row) if item.kind() == "comment" && trails(*item, prev_end_row) => {
@@ -1081,13 +1141,26 @@ fn items_one_per_line(items: &[Node], style: &ListStyle, ctx: &Ctx, shape: Shape
                 row.trailing.push_str(ctx.text(*item));
             },
             _ if item.kind() == "comment" => {
+                comments_start.get_or_insert(rows.len());
                 rows.push(Row::new(ctx.text(*item).to_string(), false, blank));
             },
-            _ => rows.push(Row::new(
-                render(*item, ctx, inner),
-                comma_follows(*item),
-                blank,
-            )),
+            _ => {
+                rows.push(Row::new(
+                    render(*item, ctx, inner),
+                    comma_follows(*item),
+                    blank,
+                ));
+
+                // The formatter sets a named function off with a blank line, so a table of
+                // them reads as a list of methods. That blank belongs above the comments
+                // that document the function, never between them and the function itself.
+                // Nothing to set off when the comments open the table, so it stays out.
+                let start = comments_start.unwrap_or(rows.len() - 1);
+                if !blank && start > 0 && is_function_slot(*item) {
+                    rows[start].preceded_by_blank = true;
+                }
+                comments_start = None;
+            },
         }
         prev_end_row = Some(item.end_position().row);
         prev_end_byte = item.end_byte();
